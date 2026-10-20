@@ -1000,7 +1000,7 @@ def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
         pass
 
     if not WP_USERNAME or "your_wp_username" in WP_USERNAME or "your-wordpress-site.com" in WP_SITE_URL:
-        print(f"   [!] WordPress credentials missing! Saved Local Preview: {preview_path}")
+        print(f"    [!] WordPress credentials missing! Saved Local Preview: {preview_path}")
         return 0
 
     try:
@@ -1022,31 +1022,38 @@ def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
         res = requests.post(api_url, json=payload, headers=headers, timeout=25)
         if res.status_code in [200, 201]:
             wp_id = res.json().get("id", 0)
-            print(f"   [SUCCESS] Professional Draft Created in WordPress (ID: {wp_id}): {title}")
+            print(f"    [SUCCESS] Professional Draft Created in WordPress (ID: {wp_id}): {title}")
             return wp_id
         else:
-            print(f"   [!] WordPress API Status: {res.status_code} - {res.text[:150]}")
+            print(f"    [!] WordPress API Status: {res.status_code} - {res.text[:150]}")
     except Exception as e:
-        print(f"   [!] WordPress Error: {e}")
+        print(f"    [!] WordPress Error: {e}")
     return 0
 
 # =====================================================================
 # 8. SMART SINGLE-RUN SCANNER FOR GITHUB ACTIONS 24/7 AUTOMATION
 # =====================================================================
 def run_hourly_scanner():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8"
+    }
     current_check_str = datetime.datetime.now().strftime("%d %b %Y, %I:%M %p")
-    print(f"\n[HOURLY SCAN - {current_check_str}] Checking all 39 official portals...")
+    total_portals = len(GOVT_PORTALS)
+    print(f"\n[HOURLY SCAN - {current_check_str}] Checking all {total_portals} official portals...")
 
     new_found_total = 0
 
-    for portal_info in GOVT_PORTALS:
+    for idx, portal_info in enumerate(GOVT_PORTALS, start=1):
         portal = portal_info["url"]
+        portal_name = portal_info["portal_name"]
         portal_already_synced = is_portal_synced(portal)
 
         try:
-            response = requests.get(portal, headers=headers, timeout=15, verify=False)
+            response = requests.get(portal, headers=headers, timeout=20, verify=False)
             if response.status_code != 200:
+                print(f"   [{idx:02d}/{total_portals}] [Skip] Server returned HTTP {response.status_code}: {portal_name}")
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
@@ -1068,7 +1075,7 @@ def run_hourly_scanner():
                     mark_as_processed(portal, full_target_url, n_key, link_text[:100], "OLD_LOCKED", "IGNORED_OLD", 0, "")
                     locked_count += 1
                 mark_portal_synced(portal)
-                print(f"   [Initial Lock] {portal_info['portal_name']}: Locked {locked_count} existing links.")
+                print(f"   [{idx:02d}/{total_portals}] [Initial Lock] {portal_name}: Locked {locked_count} existing links.")
                 continue
 
             # STEP B: PORTAL IS ALREADY LOCKED -> CHECK ONLY FOR NEW & 100% FRESH NOTICES
@@ -1100,12 +1107,12 @@ def run_hourly_scanner():
 
                 is_fresh, reason = verify_is_truly_fresh(link_text, source_text, last_mod, pdf_date)
                 if not is_fresh:
-                    print(f"   [Rejected Old Notice] {link_text[:50]}... -> {reason}")
+                    print(f"   [{idx:02d}/{total_portals}] [Rejected Old Notice] {portal_name}: {link_text[:45]}... -> {reason}")
                     mark_as_processed(portal, full_target_url, n_key, link_text[:100], f"OLD_REJECTED ({reason})", "IGNORED_OLD", 0, content_hash)
                     continue
 
-                print(f"   [FRESH {category.upper()} FOUND!] {link_text[:65]}...")
-                print(f"   [PROFESSIONAL TITLE] -> {proposed_seo_title}")
+                print(f"   [{idx:02d}/{total_portals}] [FRESH {category.upper()} FOUND!] {portal_name}: {link_text[:60]}...")
+                print(f"       [PROFESSIONAL TITLE] -> {proposed_seo_title}")
 
                 seo_title, article_html = generate_professional_1000_words_article(
                     portal_info, research_data, full_target_url, category, source_text, doc_format
@@ -1119,15 +1126,18 @@ def run_hourly_scanner():
                 if processed_count >= 2:
                     break
 
+            if processed_count == 0:
+                print(f"   [{idx:02d}/{total_portals}] [Checked OK] {portal_name} (Scanned {len(links)} links - No new update)")
+
         except Exception:
-            print(f"   [Skip] Portal currently slow: {portal_info['portal_name']}")
+            print(f"   [{idx:02d}/{total_portals}] [Skip] Portal currently slow: {portal_name}")
 
         time.sleep(0.5)
 
     if new_found_total == 0:
-        print("   [STATUS] Scan complete. Kisi bhi portal par abhi koi naya fresh update nahi aaya hai.")
+        print("\n   [STATUS] Scan complete. Sabhi 39 portals check ho gaye, abhi koi naya fresh update nahi aaya hai.")
     else:
-        print(f"   [STATUS] Scan complete! Total {new_found_total} naye professional articles WordPress Draft mein bheje gaye.")
+        print(f"\n   [STATUS] Scan complete! Total {new_found_total} naye professional articles WordPress Draft mein bheje gaye.")
 
 if __name__ == "__main__":
     disable_cmd_quickedit()
@@ -1144,4 +1154,3 @@ if __name__ == "__main__":
 
     # GitHub Actions ke liye Single Run (Taaki 2 minute mein kaam karke सफलतापूर्वक बंद हो जाए)
     run_hourly_scanner()
-
