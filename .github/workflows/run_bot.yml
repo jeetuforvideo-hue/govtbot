@@ -23,7 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 pymupdf google-generativeai
+          pip install requests beautifulsoup4 pymupdf 
 
       - name: Run Bot Script
         env:
