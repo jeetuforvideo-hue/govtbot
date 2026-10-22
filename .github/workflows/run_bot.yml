@@ -11,10 +11,13 @@ permissions:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,9 +37,9 @@ jobs:
         run: |
           python gov_vibhaf_master.py
 
-      - name: Save Updated Database
+      - name: Save Updated Database Safely
         run: |
           git config --global user.name "GovtBot Auto"
           git config --global user.email "bot@govtvibhag.com"
           git add govt_vibhag_master.db
-          git diff --staged --quiet || (git commit -m "Auto-update database after scan" && git pull --rebase origin main && git push)
+          git diff --staged --quiet || (git commit -m "Auto-update database after scan" && git pull --rebase origin main || echo "Rebase skipped" && git push origin main || echo "Push skipped")
