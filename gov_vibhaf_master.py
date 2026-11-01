@@ -30,12 +30,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. WORDPRESS & AI CONFIGURATION (Auto-Reads from GitHub Secrets / Env)
 # =====================================================================
 WP_SITE_URL = os.getenv("WP_SITE_URL", "https://govtvibhag.com").strip()
-WP_USERNAME = os.getenv("WP_USERNAME", "your_wp_username").strip()
-WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "your_wp_application_password").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your_gemini_api_key").strip()
+WP_USERNAME = os.getenv("WP_USERNAME", "jeetuforvideo@gmail.com").strip()
+WP_APP_PASSWORD = os.getenv("WP_APP_PASSWORD", "bFMI riXU vABH xwzR eD4r diWN").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6JOH2SGC7DbSEgC8JPV4rnwQtP64bCe_PlS-V-2eWi-7A").strip()
+
+# अगर आप चाहते हैं कि आर्टिकल सीधे वेबसाइट के होमपेज पर लाइव दिखे तो "publish" लिखें,
+# और अगर WordPress -> Posts -> Drafts में चेक करके पब्लिश करना चाहते हैं तो "draft" रहने दें:
+WP_POST_STATUS = os.getenv("WP_POST_STATUS", "draft").strip()
 
 DB_NAME = "govt_vibhag_master.db"
 DATA_FOLDER = "scraped_data_cache"
+BASELINE_VERSION_KEY = "v10_strict_baseline_locked"
 
 def disable_cmd_quickedit():
     if os.name == 'nt':
@@ -50,7 +55,7 @@ def disable_cmd_quickedit():
             pass
 
 # =====================================================================
-# 2. 39 OFFICIAL GOVERNMENT PORTALS (Direct Recruitment & Notice Pages)
+# 2. 39 OFFICIAL GOVERNMENT PORTALS
 # =====================================================================
 GOVT_PORTALS = [
     {"url": "https://aiimsexams.ac.in", "org": "All India Institute of Medical Sciences (AIIMS, New Delhi)", "short_org": "AIIMS", "portal_name": "AIIMS Examination Portal"},
@@ -103,7 +108,8 @@ IGNORE_KEYWORDS = [
     "tender", "quotation", "auction", "deputation", "pension", "rti",
     "contact us", "about us", "disclaimer", "privacy policy", "terms", "faq",
     "helpdesk", "mock test", "annual report", "seniority list", "medical reimbursement",
-    "screen reader", "skip to main", "sitemap", "feedback", "accessibility", "citizen charter"
+    "screen reader", "skip to main", "sitemap", "feedback", "accessibility", "citizen charter",
+    "archive", "old question", "previous year", "holiday list", "panel", "empaneled"
 ]
 
 GENERIC_MENU_TITLES = [
@@ -115,7 +121,7 @@ GENERIC_MENU_TITLES = [
 ]
 
 # =====================================================================
-# 3. DATABASE & 4-LAYER ANTI-DUPLICATE ENGINE
+# 3. DATABASE & STRICT BASELINE LOCK ENGINE
 # =====================================================================
 def normalize_url(url_str):
     try:
@@ -173,17 +179,28 @@ def init_db():
     conn.commit()
     conn.close()
 
-def ensure_bot_start_time():
+def ensure_fresh_v10_baseline_and_start_time():
+    """
+    Yeh function ensure karta hai ki jab aap yeh naya v10 code dalenge,
+    tab ka exact Timestamp save ho aur purane saare notices ek baar phir se 100% Lock ho jayein!
+    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'bot_start_iso'")
-    row = cursor.fetchone()
-    if not row:
+    cursor.execute("SELECT setting_value FROM bot_settings WHERE setting_key = ?", (BASELINE_VERSION_KEY,))
+    v_row = cursor.fetchone()
+
+    if not v_row:
+        # Naya code dala gaya hai: abhi ka exact time set karo aur sabhi portals ko re-lock mode me dalo
         now_iso = datetime.datetime.now().isoformat()
-        cursor.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES ('bot_start_iso', ?)", (now_iso,))
+        cursor.execute("DELETE FROM synced_portals")
+        cursor.execute("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('bot_start_iso', ?)", (now_iso,))
+        cursor.execute("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, 'LOCKED')", (BASELINE_VERSION_KEY,))
         conn.commit()
         conn.close()
         return datetime.datetime.fromisoformat(now_iso)
+
+    cursor.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'bot_start_iso'")
+    row = cursor.fetchone()
     conn.close()
     return datetime.datetime.fromisoformat(row[0])
 
@@ -251,7 +268,7 @@ def mark_as_processed(portal_url, target_url, notice_key, raw_title, seo_title, 
     conn.close()
 
 # =====================================================================
-# 4. SMART NOTIFICATION FILTER, PDF DOWNLOADER & ACTIVE LINK DETECTOR
+# 4. SMART NOTIFICATION FILTER & CONTEXT EXTRACTOR
 # =====================================================================
 def extract_smart_link_text(link_tag):
     raw_text = sanitize_clean_text(link_tag.get_text(" ", strip=True))
@@ -280,7 +297,8 @@ def is_genuine_notification(link_text, full_url):
     if lower_url.startswith("javascript:") or lower_url.startswith("mailto:") or full_url.endswith("#"):
         return False
 
-    if re.search(r'\b(2015|2016|2017|2018|2019|2020|2021|2022|2023|2024)\b', lower_text) and "2026" not in lower_text and "2025" not in lower_text:
+    # Reject any older year in title or URL
+    if re.search(r'\b(2015|2016|2017|2018|2019|2020|2021|2022|2023|2024|2025)\b', lower_text + " " + lower_url) and "2026" not in (lower_text + " " + lower_url):
         return False
 
     all_valid_keywords = JOB_KEYWORDS + ADMIT_CARD_KEYWORDS + ANSWER_KEY_KEYWORDS + RESULT_KEYWORDS
@@ -288,7 +306,7 @@ def is_genuine_notification(link_text, full_url):
 
     has_keyword = any(k in lower_text or k in lower_url for k in all_valid_keywords)
     has_exam_code = bool(re.search(
-        r'(2026|2025-26|\d{1,3}/2026|advt|stage|tier|norcet|cet|cgl|chsl|mts|gd|ntpc|alp|je|constable|si|asi|clerk|po|so|officer|assistant|engineer|teacher|tgt|pgt|prt|stenographer|group\s*[a-d]|grade\s*[a-d])',
+        r'(2026|\d{1,3}/2026|advt|stage|tier|norcet|cet|cgl|chsl|mts|gd|ntpc|alp|je|constable|si|asi|clerk|po|so|officer|assistant|engineer|teacher|tgt|pgt|prt|stenographer|group\s*[a-d]|grade\s*[a-d])',
         lower_text
     ))
 
@@ -298,11 +316,6 @@ def is_genuine_notification(link_text, full_url):
     return False
 
 def extract_source_and_metadata(target_url):
-    """
-    PDF ko download karke uska text aur headings nikalta hai.
-    Agar PDF nahi hai (Active Web Link hai jaise Admit Card/Result login window),
-    toh webpage ka text aur link context nikalta hai.
-    """
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         response = requests.get(target_url, headers=headers, timeout=20, verify=False)
@@ -336,7 +349,6 @@ def extract_source_and_metadata(target_url):
                 raw_text_lines.extend(page_text.splitlines())
             doc.close()
 
-            # PDF ke andar se important headings extract karna (Jo user ke workflow ka hissa hai)
             heading_patterns = re.compile(
                 r'^(?:\d+[\.\)]\s*|[A-Z]\.\s*)?(?:IMPORTANT\s+DATES|VACANCY\s+DETAILS|ELIGIBILITY\s+CRITERIA|EDUCATIONAL\s+QUALIFICATION|AGE\s+LIMIT|APPLICATION\s+FEE|SELECTION\s+PROCESS|SCHEME\s+OF\s+EXAMINATION|SYLLABUS|HOW\s+TO\s+APPLY|PAY\s+SCALE|SALARY|CUT[\s-]*OFF|MERIT\s+LIST|DOCUMENT\s+VERIFICATION|TIE[\s-]*BREAKING|NORMALIZATION|INSTRUCTIONS\s+FOR\s+CANDIDATES)',
                 re.IGNORECASE
@@ -373,12 +385,9 @@ def determine_category(text_combined):
     return "Govt Job"
 
 # =====================================================================
-# 5. STEP-BY-STEP HUMAN WRITER WORKFLOW (Google Cross-Check + Gemini Deep Audit)
+# 5. STRICT POST-START-TIME VERIFIER & GOOGLE + GEMINI CROSS-CHECK
 # =====================================================================
 def call_gemini_json_or_text(prompt_text, expect_json=False):
-    """
-    Gemini API Call helper.
-    """
     if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key":
         return None
     try:
@@ -397,22 +406,50 @@ def call_gemini_json_or_text(prompt_text, expect_json=False):
         pass
     return None
 
-def cross_check_active_link_on_google(short_org, raw_notice_title, category):
+def parse_any_date_from_text(text_sample):
     """
-    WORKFLOW STEP: Jab koi Admit Card, Result ya Answer Key bina PDF ke sidhe Naye Link ke roop me aati hai,
-    ya jab PDF aata hai, toh Google News/Web RSS par search karke cross-check karta hai ki
-    yeh link kab active hui hai, kiski hai aur kya khabar chal rahi hai.
+    Text ya title me likhi gayi kisi bhi date (e.g. 25/10/2026, 25-10-2026, 25 October 2026) ko nikalta hai.
+    """
+    detected_dates = []
+    # Pattern 1: DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+    for m in re.finditer(r'\b(\d{1,2})[./-](\d{1,2})[./-](202\d)\b', text_sample):
+        d, mn, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            detected_dates.append(datetime.date(y, mn, d))
+        except Exception:
+            pass
+
+    # Pattern 2: DD Month YYYY
+    months_map = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+    }
+    for m in re.finditer(r'\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s,]+(202\d)\b', text_sample, re.I):
+        d = int(m.group(1))
+        mn = months_map.get(m.group(2)[:3].lower(), 1)
+        y = int(m.group(3))
+        try:
+            detected_dates.append(datetime.date(y, mn, d))
+        except Exception:
+            pass
+    return detected_dates
+
+def cross_check_active_link_on_google(short_org, raw_notice_title, category, bot_start_dt):
+    """
+    Google News RSS par cross-check karta hai aur dekhta hai ki kya is par abhi-abhi (bot_start_dt ke baad) khabar aayi hai.
     """
     snippets = []
     trending_titles = []
     found_date = ""
+    has_recent_google_hit = False
+
     try:
-        search_q = f"{short_org} {raw_notice_title[:55]} {category} 2026"
+        search_q = f'"{short_org}" {raw_notice_title[:50]} {category} when:1d'
         rss_url = f"https://news.google.com/rss/search?q={quote_plus(search_q)}&hl=en-IN&gl=IN&ceid=IN:en"
         res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "xml")
-            for item in soup.find_all("item")[:6]:
+            for item in soup.find_all("item")[:5]:
                 t = item.find("title")
                 pub = item.find("pubDate")
                 if t and t.text:
@@ -420,77 +457,109 @@ def cross_check_active_link_on_google(short_org, raw_notice_title, category):
                     trending_titles.append(clean_t)
                     pub_str = pub.text if pub else ""
                     snippets.append(f"{clean_t} (Published: {pub_str})")
-                    if not found_date:
-                        dm = re.search(r'\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+2026)\b', clean_t + " " + pub_str, re.I)
-                        if dm:
-                            found_date = dm.group(1)
+                    if pub_str:
+                        try:
+                            pub_dt = parsedate_to_datetime(pub_str).replace(tzinfo=None)
+                            # Agar Google News article bot start hone ke 24 ghante ke andar ka hai
+                            if (pub_dt.date() >= bot_start_dt.date()):
+                                has_recent_google_hit = True
+                                found_date = pub_dt.strftime("%d %B %Y")
+                        except Exception:
+                            pass
     except Exception:
         pass
+
     return {
         "trending_titles": trending_titles,
         "google_snippets": snippets,
-        "google_date": found_date
+        "google_date": found_date,
+        "has_recent_google_hit": has_recent_google_hit
     }
 
-def verify_is_truly_fresh_with_gemini_audit(portal_info, raw_title, source_text, doc_format, last_modified_header, pdf_internal_date, google_cross_data):
+def verify_is_truly_published_after_bot_start(portal_info, raw_title, source_text, doc_format, last_modified_header, pdf_internal_date, google_cross_data, bot_start_dt):
     """
-    WORKFLOW STEP 1 (Aapka Tarika):
-    1. Pehle local metadata aur date check karta hai.
-    2. Phir Gemini se bilkul bariki se puchta hai:
-       "Yeh PDF ya Active Link kis samay ka hai, kab jari hua hai? Bilkul bariki se janch karke batao ki yeh fresh hai ya purana."
+    STRICT FILTER:
+    Yeh function ensure karta hai ki:
+    1. Code jab dala gaya hai (bot_start_dt), us तारीख se pehle ka koi bhi PDF ya Link bilkul pass na ho!
+    2. Server header, PDF internal date, PDF ke shuruat me likhi Release Date ("Dated: ..."), Google Cross-Check, aur Gemini Audit—sabhi se check ho.
     """
-    today = datetime.datetime.now().date()
+    today_date = datetime.datetime.now().date()
+    bot_start_date = bot_start_dt.date()
 
+    # RULE 1: Check PDF Internal Creation/Modification Date
     if pdf_internal_date:
-        days_old = (today - pdf_internal_date).days
-        if days_old > 12:
-            return False, f"Old PDF Metadata Date ({pdf_internal_date})", ""
+        if pdf_internal_date < bot_start_date:
+            return False, f"Old PDF Created Before Code Start ({pdf_internal_date} < {bot_start_date})", ""
 
+    # RULE 2: Check Server Last-Modified Header
     if last_modified_header:
         try:
             mod_dt = parsedate_to_datetime(last_modified_header).replace(tzinfo=None)
-            if (today - mod_dt.date()).days > 12:
-                return False, f"Old Server File ({mod_dt.date()})", ""
+            if mod_dt.date() < bot_start_date:
+                return False, f"Server File Older Than Code Start ({mod_dt.date()} < {bot_start_date})", ""
         except Exception:
             pass
 
-    if re.search(r'\b(2018|2019|2020|2021|2022|2023|2024)\b', raw_title.lower()) and "2026" not in raw_title.lower() and "2025" not in raw_title.lower():
-        return False, "Old Year in Notice Title", ""
+    # RULE 3: Check Explicit "Dated:" or Notice Release Date in Title & Top 600 chars of PDF
+    header_snippet = f"{raw_title} {source_text[:600]}"
+    dated_match = re.search(r'(?:dated|date|दिनांक|dt\.?)\s*[:=-]?\s*(\d{1,2}[./-]\d{1,2}[./-]202\d|\d{1,2}\s+[A-Za-z]+\s+202\d)', header_snippet, re.I)
+    if dated_match:
+        parsed_d_list = parse_any_date_from_text(dated_match.group(1))
+        if parsed_d_list:
+            notice_issue_date = parsed_d_list[0]
+            if notice_issue_date < bot_start_date:
+                return False, f"Notice Issue Date ({notice_issue_date}) is Older Than Code Start ({bot_start_date})", ""
 
-    # Gemini Deep Audit (Jaise aap PDF daal kar Gemini se bariki se puchte hain)
-    audit_prompt = f"""
-    आप एक सीनियर सरकारी नौकरी (Sarkari Naukri) डॉक्यूमेंट वेरिफायर हैं।
-    आज की तारीख: {today.strftime('%d %B %Y')} है।
-    
-    मैंने आधिकारिक वेबसाइट ({portal_info['org']}) से यह नया नोटिस/लिंक पकड़ा है।
-    कृपया बिल्कुल बारीकी से जांच (Deep Audit) करके बताएं:
-    1. यह पीडीएफ या एक्टिव लिंक किस समय का है (कब जारी हुआ है)?
-    2. क्या यह हाल ही का ताज़ा (Fresh 2026) अपडेट है या कोई बहुत पुराना (2022/2023/2024 का) आर्काइव नोटिस है?
-    3. यह किस परीक्षा/भर्ती और किस काम (Recruitment / Admit Card / Result / Answer Key) से संबंधित है?
+    # RULE 4: Check if all dates mentioned in the title are in the past (before bot_start_date)
+    title_dates = parse_any_date_from_text(raw_title)
+    if title_dates and max(title_dates) < bot_start_date:
+        return False, f"Title Date ({max(title_dates)}) is Older Than Code Start ({bot_start_date})", ""
 
-    Input Details:
-    - Notice / Link Text: {raw_title}
-    - Format Type: {doc_format}
-    - PDF Internal Date (if any): {pdf_internal_date}
-    - Google Cross-Check Snippets: {" | ".join(google_cross_data.get("google_snippets", [])[:4])}
-    - Extracted PDF/Webpage Text (First 2500 chars): {source_text[:2500]}
+    # RULE 5: Gemini Deep Audit (Strict Check against bot_start_date)
+    if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key":
+        audit_prompt = f"""
+        आप एक बहुत ही सख्त सरकारी नौकरी (Sarkari Naukri) वेरिफायर हैं।
+        कोड चालू होने की तारीख (Bot Start Date): {bot_start_date.strftime('%d %B %Y')}
+        आज की तारीख: {today_date.strftime('%d %B %Y')}
 
-    Return strictly a JSON object with keys:
-    {{
-        "is_fresh": true or false,
-        "issue_date_detected": "Detected release date or 'Recent 2026 Update'",
-        "exact_purpose": "1 line summary of what this PDF/Link is about",
-        "rejection_reason": "If is_fresh is false, explain why in short"
-    }}
-    """
-    ai_verdict = call_gemini_json_or_text(audit_prompt, expect_json=True)
-    if isinstance(ai_verdict, dict):
-        if not ai_verdict.get("is_fresh", True):
-            return False, f"Gemini Deep Audit Rejected: {ai_verdict.get('rejection_reason', 'Old Notice')}", ""
-        detected_date = ai_verdict.get("issue_date_detected", "")
-        return True, f"Verified Fresh ({detected_date})", ai_verdict.get("exact_purpose", "")
+        नियम: हमें केवल उन्हीं वैकेंसी, रिजल्ट, एडमिट कार्ड या आंसर की पर आर्टिकल लिखना है जो {bot_start_date.strftime('%d %B %Y')} को या उसके बाद जारी (Release/Active) हुए हैं। पहले से पड़े हुए किसी भी पुराने नोटिस पर आर्टिकल नहीं लिखना है।
 
-    return True, "100% Fresh Update (Rule Verified)", ""
+        नीचे दिए गए डेटा की बारीकी से जांच करें:
+        - विभाग: {portal_info['org']}
+        - नोटिस/लिंक का शीर्षक: {raw_title}
+        - फॉर्मेट: {doc_format}
+        - पीडीएफ मेटाडेटा तारीख: {pdf_internal_date}
+        - गूगल क्रॉस-चेक डेटा: {" | ".join(google_cross_data.get("google_snippets", [])[:4])}
+        - पीडीएफ/वेबपेज का शुरुआती टेक्स्ट: {source_text[:2500]}
+
+        सख्त निर्णय लें:
+        - यदि पीडीएफ या वेबपेज पर जारी होने की तारीख (Release/Dated) {bot_start_date.strftime('%d %B %Y')} से पहले की है, तो `is_fresh` को `false` रखें।
+        - यदि यह कोई पुराना आर्काइव, टेंडर, या पुरानी भर्ती है, तो `is_fresh` को `false` रखें।
+
+        Return strictly JSON:
+        {{
+            "is_fresh": true or false,
+            "issue_date_detected": "Detected release date",
+            "exact_purpose": "1 line summary",
+            "rejection_reason": "Reason if false"
+        }}
+        """
+        ai_verdict = call_gemini_json_or_text(audit_prompt, expect_json=True)
+        if isinstance(ai_verdict, dict):
+            if not ai_verdict.get("is_fresh", False):
+                return False, f"Gemini Strict Audit Rejected: {ai_verdict.get('rejection_reason', 'Published before bot start')}", ""
+            return True, f"Gemini Verified Fresh ({ai_verdict.get('issue_date_detected', 'Today')})", ai_verdict.get("exact_purpose", "")
+
+    # RULE 6: Agar Gemini API Key nahi lagi hai, tab bhi blind 'True' mat karo!
+    # Tab sirf tabhi pass karo jab ya toh PDF date >= bot_start_date ho, ya Server Last-Modified >= bot_start_date ho,
+    # ya Notice me aaj ki tarikh likhi ho, ya Google News par aaj/kal me khabar aayi ho!
+    has_today_date_in_text = (today_date in parse_any_date_from_text(header_snippet)) or (bot_start_date in parse_any_date_from_text(header_snippet))
+    has_fresh_pdf_or_server_date = (pdf_internal_date and pdf_internal_date >= bot_start_date)
+
+    if has_fresh_pdf_or_server_date or has_today_date_in_text or google_cross_data.get("has_recent_google_hit", False):
+        return True, f"Verified Fresh Post-{bot_start_date} Update", ""
+
+    return False, f"No proof of release on/after {bot_start_date} (Blocked to prevent old notice)", ""
 
 # =====================================================================
 # 6. SEO TITLE RESEARCH, PDF HEADINGS & DATA EXTRACTION ENGINE
@@ -550,11 +619,6 @@ def extract_deep_pdf_details_for_student(combined_text):
     }
 
 def build_article_blueprint(portal_info, raw_notice_title, pdf_text, category, pdf_headings, google_cross_data, ai_purpose_summary=""):
-    """
-    WORKFLOW STEP 2 & 3 (Aapka Tarika):
-    - Pehle dekhta hai iska Title kya ho sakta hai, Google search trends se milakar best SEO-Friendly Title chunta hai.
-    - Phir PDF me di gayi Headings + Category ke hisaab se zaroori Headings ki list taiyar karta hai.
-    """
     short_org = portal_info["short_org"]
     cleaned_notice = sanitize_clean_text(raw_notice_title)
     cleaned_notice = re.sub(r'\.pdf$|\.html$|\.aspx$', '', cleaned_notice, flags=re.IGNORECASE)
@@ -603,7 +667,6 @@ def build_article_blueprint(portal_info, raw_notice_title, pdf_text, category, p
     student_details = extract_deep_pdf_details_for_student(combined_search_space)
     posts_badge = f" ({student_details['total_posts']})" if "Posts" in student_details["total_posts"] and category == "Govt Job" else ""
 
-    # Default High-CTR SEO Titles
     if category == "Result":
         seo_title = f"{short_exam_heading} Out: Merit List PDF, Cut Off Marks और Roll Number यहाँ से चेक करें"
         smart_headings = [
@@ -646,7 +709,6 @@ def build_article_blueprint(portal_info, raw_notice_title, pdf_text, category, p
             f"{short_exam_heading}: Direct Official Links"
         ]
 
-    # Agar PDF ke andar se khas headings mili hain, toh unhe bhi blueprint me shamil karna
     for ph in pdf_headings[:2]:
         custom_h = f"{core_exam_name}: {ph} (नोटिफिकेशन के अनुसार)"
         if custom_h not in smart_headings:
@@ -683,17 +745,9 @@ def build_article_blueprint(portal_info, raw_notice_title, pdf_text, category, p
     }
 
 # =====================================================================
-# 7. HUMAN-STYLE 1000+ WORDS ARTICLE ENGINE (Overview + Paragraphs + Bullet Points)
+# 7. HUMAN-STYLE 1000+ WORDS ARTICLE ENGINE
 # =====================================================================
 def generate_professional_1000_words_article(portal_info, research_data, target_url, category, source_text, doc_format):
-    """
-    WORKFLOW STEP 4 & 5 (Bilkul aapke likhne ke tarike par aadharit):
-    1. Sabse pehle best SEO-Friendly Title banata hai.
-    2. Shuruat me hi 6-7 lines ka crisp Overview Table deta hai jisme saari mukhya jankari ek nazar me dikhe.
-    3. PDF me di gayi headings (aur category ki zaroori headings) lagata hai.
-    4. Har heading ke andar pehle achhe Paragraphs likhta hai aur phir unke andar Bullet Points (<ul>/<li>) me chije samjhata hai taaki dekhne aur padhne dono me user ko achha lage.
-    5. 1,000+ words ka bada, vishwasniya aur student-friendly article taiyar karta hai.
-    """
     org_name = portal_info["org"]
     short_org = portal_info["short_org"]
     portal_name = portal_info["portal_name"]
@@ -715,7 +769,6 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
     trending_ref = " | ".join(research_data["trending_titles"][:4]) if research_data["trending_titles"] else research_data["seo_title"]
     google_context = " | ".join(research_data.get("google_snippets", [])[:3])
 
-    # 1. Try Gemini Pro Writer with your exact instructions
     if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key":
         writer_prompt = f"""
         आप एक बहुत ही अनुभवी, प्रोफेशनल हिंदी कंटेंट राइटर (Sarkari Naukri & Competitive Exam Expert) हैं।
@@ -754,7 +807,6 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
             if len(clean_ai_html.split()) >= 800:
                 return research_data["seo_title"], clean_ai_html
 
-    # 2. Built-in 1,100+ Words Human-Style Editorial Engine (Follows exact Overview + Paragraph + Bullet Points structure)
     overview_6_line_table = f"""
     <h2>{short_exam}: एक नज़र में संपूर्ण विवरण (Quick Overview Table)</h2>
     <p>जो उम्मीदवार कम समय में इस आधिकारिक अपडेट की पूरी जानकारी समझना चाहते हैं, उनके लिए हमने नीचे 6 मुख्य बिंदुओं की यह सारणी (Overview Table) तैयार की है। इसमें विभाग के नाम से लेकर आधिकारिक लिंक तक सभी जरूरी तथ्य शामिल हैं:</p>
@@ -777,7 +829,6 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
     </div>
     """
 
-    # Extra section if PDF had specific custom headings
     extra_pdf_heading_html = ""
     if research_data.get("pdf_headings"):
         bullet_items = "".join([f"<li><strong>{ph}:</strong> आधिकारिक {doc_format} के इस खंड में उम्मीदवारों के लिए श्रेणीवार नियम, समय-सारणी और आवश्यक मानकों का विस्तृत उल्लेख किया गया है।</li>" for ph in research_data["pdf_headings"][:5]])
@@ -1000,8 +1051,39 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
     return research_data["seo_title"], full_html.strip()
 
 # =====================================================================
-# 8. WORDPRESS DRAFT PUBLISHER
+# 8. WORDPRESS PUBLISHER + STARTUP CONNECTION DIAGNOSTIC
 # =====================================================================
+def test_wordpress_connection():
+    """
+    Code shuru hote hi check karta hai ki WordPress par post kyun nahi ja rahi hai.
+    """
+    if not WP_USERNAME or "your_wp_username" in WP_USERNAME or "your_wp_application_password" in WP_APP_PASSWORD:
+        print("   [WP WARNING] WordPress Username ya Application Password abhi set nahi hai!")
+        print("   -> Agar GitHub Actions par chala rahe hain toh Settings -> Secrets me WP_USERNAME aur WP_APP_PASSWORD dalein.")
+        print("   -> Agar PC par chala rahe hain toh code me line 30-32 par apna Username aur App Password dalein.")
+        return False
+
+    try:
+        test_url = f"{WP_SITE_URL.rstrip('/')}/wp-json/wp/v2/users/me"
+        clean_app_pass = WP_APP_PASSWORD.replace(" ", "")
+        token = base64.b64encode(f"{WP_USERNAME}:{clean_app_pass}".encode()).decode("utf-8")
+        headers = {
+            "Authorization": f"Basic {token}",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36"
+        }
+        res = requests.get(test_url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            user_name = res.json().get("name", WP_USERNAME)
+            print(f"   [WP CONNECTED OK] Successfully connected to {WP_SITE_URL} as '{user_name}' (Post Mode: {WP_POST_STATUS.upper()})")
+            return True
+        else:
+            print(f"   [WP AUTH ERROR {res.status_code}] Website ne login reject kiya: {res.text[:180]}")
+            print("   -> Check karein ki WP Admin -> Users -> Profile me जाकर आपने 'Application Password' banaya hai (Normal login password REST API me kaam nahi karta).")
+            return False
+    except Exception as e:
+        print(f"   [WP CONNECTION FAILED] {e}")
+        return False
+
 def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
     preview_path = os.path.join(DATA_FOLDER, "latest_govtvibhag_style_draft.html")
     try:
@@ -1010,8 +1092,8 @@ def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
     except Exception:
         pass
 
-    if not WP_USERNAME or "your_wp_username" in WP_USERNAME or "your-wordpress-site.com" in WP_SITE_URL:
-        print(f"    [!] WordPress credentials missing! Saved Local Preview: {preview_path}")
+    if not WP_USERNAME or "your_wp_username" in WP_USERNAME or "your_wp_application_password" in WP_APP_PASSWORD:
+        print(f"    [!] WordPress credentials missing! Saved Local Preview Only: {preview_path}")
         return 0
 
     try:
@@ -1023,33 +1105,35 @@ def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
         headers = {
             "Authorization": f"Basic {token}",
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
         payload = {
             "title": title,
             "content": html_content,
-            "status": "draft"
+            "status": WP_POST_STATUS
         }
         res = requests.post(api_url, json=payload, headers=headers, timeout=25)
         if res.status_code in [200, 201]:
             wp_id = res.json().get("id", 0)
-            print(f"    [SUCCESS] Professional Draft Created in WordPress (ID: {wp_id}): {title}")
+            wp_link = res.json().get("link", "")
+            print(f"    [SUCCESS] Article Uploaded to WordPress ({WP_POST_STATUS.upper()} | ID: {wp_id}) -> {wp_link}")
             return wp_id
         else:
-            print(f"    [!] WordPress API Status: {res.status_code} - {res.text[:150]}")
+            print(f"    [!] WordPress API Status: {res.status_code} - {res.text[:200]}")
     except Exception as e:
-        print(f"    [!] WordPress Error: {e}")
+        print(f"    [!] WordPress Upload Error: {e}")
     return 0
 
 # =====================================================================
-# 9. SMART SCANNER WITH JS-PORTAL RSS FALLBACK
+# 9. SMART SCANNER WITH COMPLETE INITIAL LOCK (HTML + RSS BOTH LOCKED)
 # =====================================================================
 def fetch_fallback_updates_for_js_portal(portal_info):
     discovered = []
     short_org = portal_info["short_org"]
     portal_url = portal_info["url"]
     try:
-        q = f'"{short_org}" (recruitment OR result OR "admit card" OR "answer key" OR notification) when:2d'
+        q = f'"{short_org}" (recruitment OR result OR "admit card" OR "answer key" OR notification) when:1d'
         rss_url = f"[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=){quote_plus(q)}&hl=en-IN&gl=IN&ceid=IN:en"
         res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if res.status_code == 200:
@@ -1063,7 +1147,7 @@ def fetch_fallback_updates_for_js_portal(portal_info):
         pass
     return discovered
 
-def run_hourly_scanner():
+def run_hourly_scanner(bot_start_dt):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1095,20 +1179,21 @@ def run_hourly_scanner():
         except Exception:
             print(f"   [{idx:02d}/{total_portals}] [Direct Connect Slow] Using Smart Backup for: {portal_name}")
 
-        # STEP A: Initial Sync Lock (First time run locks old notices so only NEW alerts are written)
+        # Always include fallback RSS items so during Initial Lock, existing RSS items ALSO get locked!
+        if len(candidate_links) < 15 or not portal_already_synced:
+            candidate_links.extend(fetch_fallback_updates_for_js_portal(portal_info))
+
+        # STEP A: Complete Initial Baseline Lock (Locks ALL currently existing website & RSS links)
         if not portal_already_synced:
             for link_text, full_target_url in candidate_links:
                 n_key = normalize_notice_key(portal, link_text)
-                mark_as_processed(portal, full_target_url, n_key, link_text[:100], "OLD_LOCKED", "IGNORED_OLD", 0, "")
+                unique_target = full_target_url if full_target_url != portal else f"{portal}#{n_key}"
+                mark_as_processed(portal, unique_target, n_key, link_text[:100], "OLD_BASELINE_LOCKED", "IGNORED_OLD", 0, "")
             mark_portal_synced(portal)
-            print(f"   [{idx:02d}/{total_portals}] [Initial Lock] {portal_name}: Locked {len(candidate_links)} existing links.")
+            print(f"   [{idx:02d}/{total_portals}] [Baseline Lock] {portal_name}: Locked {len(candidate_links)} existing items (Zero articles written for pre-existing items).")
             continue
 
-        # Add Fallback Discovery if JS portal returned very few notice links
-        if len(candidate_links) < 15:
-            candidate_links.extend(fetch_fallback_updates_for_js_portal(portal_info))
-
-        # STEP B: Process New Alerts (PDFs as well as Newly Activated Links)
+        # STEP B: Only Check Newly Arrived Links After Baseline Lock
         processed_count = 0
         for link_text, full_target_url in candidate_links:
             if not is_genuine_notification(link_text, full_target_url):
@@ -1127,15 +1212,15 @@ def run_hourly_scanner():
             combined_info = (link_text + " " + full_target_url).lower()
             category = determine_category(combined_info)
 
-            # 2. Cross-Check on Google (Especially helpful when an Admit Card/Result/Answer Key is an Active Link without PDF)
-            google_cross_data = cross_check_active_link_on_google(portal_info["short_org"], link_text, category)
+            # 2. Cross-Check on Google
+            google_cross_data = cross_check_active_link_on_google(portal_info["short_org"], link_text, category, bot_start_dt)
 
-            # 3. Deep Freshness Audit (Metadata + Gemini Bariki se Janch)
-            is_fresh, reason, ai_purpose = verify_is_truly_fresh_with_gemini_audit(
-                portal_info, link_text, source_text, doc_format, last_mod, pdf_date, google_cross_data
+            # 3. STRICT Check: Must be published on or after bot_start_dt!
+            is_fresh, reason, ai_purpose = verify_is_truly_published_after_bot_start(
+                portal_info, link_text, source_text, doc_format, last_mod, pdf_date, google_cross_data, bot_start_dt
             )
             if not is_fresh:
-                print(f"   [{idx:02d}/{total_portals}] [Rejected Old Notice] {portal_name}: {link_text[:45]}... -> {reason}")
+                print(f"   [{idx:02d}/{total_portals}] [Blocked Pre-Existing/Old Notice] {portal_name}: {link_text[:45]}... -> {reason}")
                 mark_as_processed(portal, unique_target, n_key, link_text[:100], f"OLD_REJECTED ({reason})", "IGNORED_OLD", 0, content_hash)
                 continue
 
@@ -1149,11 +1234,11 @@ def run_hourly_scanner():
                 mark_as_processed(portal, unique_target, n_key, link_text[:100], "DUPLICATE_IGNORED", "IGNORED_DUP", 0, content_hash)
                 continue
 
-            print(f"   [{idx:02d}/{total_portals}] [FRESH {category.upper()} VERIFIED!] {portal_name}: {link_text[:60]}...")
-            print(f"       [AUDIT] -> {reason}")
+            print(f"   [{idx:02d}/{total_portals}] [NEW POST-START {category.upper()} VERIFIED!] {portal_name}: {link_text[:60]}...")
+            print(f"       [VERIFICATION] -> {reason}")
             print(f"       [SEO TITLE] -> {proposed_seo_title}")
 
-            # 5. Write 1000+ Words Article (6-Line Overview Table + PDF/Smart Headings + Paragraphs + Bullet Points)
+            # 5. Write 1000+ Words Article
             seo_title, article_html = generate_professional_1000_words_article(
                 portal_info, research_data, full_target_url, category, source_text, doc_format
             )
@@ -1167,21 +1252,22 @@ def run_hourly_scanner():
                 break
 
         if processed_count == 0:
-            print(f"   [{idx:02d}/{total_portals}] [Checked OK] {portal_name} (Scanned {len(candidate_links)} items - No new update)")
+            print(f"   [{idx:02d}/{total_portals}] [Checked OK] {portal_name} (Scanned {len(candidate_links)} items - No new post-start update)")
 
         time.sleep(0.3)
 
     if new_found_total == 0:
-        print("\n   [STATUS] Scan complete. Sabhi 39 portals check ho gaye, abhi koi naya fresh update nahi aaya hai.")
+        print("\n   [STATUS] Scan complete. Sabhi 39 portals check ho gaye, code dalne ke baad abhi koi naya update nahi aaya hai.")
     else:
-        print(f"\n   [STATUS] Scan complete! Total {new_found_total} naye professional articles WordPress Draft mein bheje gaye.")
+        print(f"\n   [STATUS] Scan complete! Total {new_found_total} naye articles WordPress ({WP_POST_STATUS}) mein bheje gaye.")
 
 if __name__ == "__main__":
     disable_cmd_quickedit()
     print("=========================================================================")
-    print("   GOVTVIBHAG.COM PROFESSIONAL EDITORIAL BOT v9.0 (HUMAN WRITER EDITION) ")
+    print("   GOVTVIBHAG.COM PROFESSIONAL EDITORIAL BOT v10.0 (STRICT LOCK EDITION) ")
     print("=========================================================================")
     init_db()
-    bot_start_dt = ensure_bot_start_time()
-    print(f"   [ACTIVE] Monitoring fresh updates since: {bot_start_dt.strftime('%d %b %Y, %I:%M %p')}")
-    run_hourly_scanner()
+    bot_start_dt = ensure_fresh_v10_baseline_and_start_time()
+    print(f"   [STRICT LOCK ACTIVE] Only writing articles released ON/AFTER: {bot_start_dt.strftime('%d %b %Y, %I:%M %p')}")
+    test_wordpress_connection()
+    run_hourly_scanner(bot_start_dt)
