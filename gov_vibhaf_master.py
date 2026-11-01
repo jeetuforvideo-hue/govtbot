@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import json
 import time
 import ctypes
 import base64
@@ -26,7 +27,7 @@ except ImportError:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =====================================================================
-# 1. WORDPRESS & AI CONFIGURATION (Auto-Reads from GitHub Secrets)
+# 1. WORDPRESS & AI CONFIGURATION (Auto-Reads from GitHub Secrets / Env)
 # =====================================================================
 WP_SITE_URL = os.getenv("WP_SITE_URL", "https://govtvibhag.com").strip()
 WP_USERNAME = os.getenv("WP_USERNAME", "your_wp_username").strip()
@@ -119,7 +120,7 @@ GENERIC_MENU_TITLES = [
 def normalize_url(url_str):
     try:
         p = urlparse(url_str.strip())
-        clean_path = re.sub(r'/+$', '', p.path)
+        clean_path = re.sub(r'/+\$', '', p.path)
         return urlunparse((p.scheme.lower(), p.netloc.lower(), clean_path, '', p.query, ''))
     except Exception:
         return url_str.strip()
@@ -250,13 +251,9 @@ def mark_as_processed(portal_url, target_url, notice_key, raw_title, seo_title, 
     conn.close()
 
 # =====================================================================
-# 4. SMART NOTIFICATION FILTER & CONTEXT EXTRACTOR (FIXED)
+# 4. SMART NOTIFICATION FILTER, PDF DOWNLOADER & ACTIVE LINK DETECTOR
 # =====================================================================
 def extract_smart_link_text(link_tag):
-    """
-    Agar link ke andar sirf 'Click Here' ya 'PDF' likha hai, toh uski Table Row (<tr>) ya Parent (<li>/<div>)
-    ka pura text uthata hai taaki asli notification title kabhi miss na ho!
-    """
     raw_text = sanitize_clean_text(link_tag.get_text(" ", strip=True))
     if len(raw_text) < 22 or raw_text.lower() in ["click here", "download", "pdf", "view", "link", "notice", "read more"]:
         parent_row = link_tag.find_parent(["tr", "li", "p", "div"])
@@ -271,7 +268,6 @@ def is_genuine_notification(link_text, full_url):
     lower_text = clean_text.lower()
     lower_url = full_url.lower()
 
-    # Relaxed length check so real notices aren't dropped
     if len(clean_text) < 12 or len(clean_text.split()) < 3:
         return False
 
@@ -284,7 +280,6 @@ def is_genuine_notification(link_text, full_url):
     if lower_url.startswith("javascript:") or lower_url.startswith("mailto:") or full_url.endswith("#"):
         return False
 
-    # Reject only if an older year is explicitly in the title AND 2026 is not
     if re.search(r'\b(2015|2016|2017|2018|2019|2020|2021|2022|2023|2024)\b', lower_text) and "2026" not in lower_text and "2025" not in lower_text:
         return False
 
@@ -303,18 +298,24 @@ def is_genuine_notification(link_text, full_url):
     return False
 
 def extract_source_and_metadata(target_url):
+    """
+    PDF ko download karke uska text aur headings nikalta hai.
+    Agar PDF nahi hai (Active Web Link hai jaise Admit Card/Result login window),
+    toh webpage ka text aur link context nikalta hai.
+    """
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         response = requests.get(target_url, headers=headers, timeout=20, verify=False)
         if response.status_code != 200:
-            return "", "Webpage", None, None
+            return "", "Active Web Link", None, None, []
 
         last_mod_header = response.headers.get("Last-Modified", None)
         pdf_internal_date = None
+        detected_headings = []
 
         if target_url.lower().endswith(".pdf") or b"%PDF" in response.content[:15]:
             if not PYMUPDF_AVAILABLE:
-                return "", "PDF", last_mod_header, None
+                return "", "Official PDF", last_mod_header, None, []
             temp_pdf = os.path.join(DATA_FOLDER, "temp_research.pdf")
             with open(temp_pdf, "wb") as f:
                 f.write(response.content)
@@ -329,41 +330,37 @@ def extract_source_and_metadata(target_url):
                 except Exception:
                     pass
 
-            text = ""
-            for page in range(min(10, len(doc))):
-                text += "\n" + doc[page].get_text("text")
+            raw_text_lines = []
+            for page in range(min(12, len(doc))):
+                page_text = doc[page].get_text("text")
+                raw_text_lines.extend(page_text.splitlines())
             doc.close()
-            return sanitize_clean_text(text), "PDF", last_mod_header, pdf_internal_date
+
+            # PDF ke andar se important headings extract karna (Jo user ke workflow ka hissa hai)
+            heading_patterns = re.compile(
+                r'^(?:\d+[\.\)]\s*|[A-Z]\.\s*)?(?:IMPORTANT\s+DATES|VACANCY\s+DETAILS|ELIGIBILITY\s+CRITERIA|EDUCATIONAL\s+QUALIFICATION|AGE\s+LIMIT|APPLICATION\s+FEE|SELECTION\s+PROCESS|SCHEME\s+OF\s+EXAMINATION|SYLLABUS|HOW\s+TO\s+APPLY|PAY\s+SCALE|SALARY|CUT[\s-]*OFF|MERIT\s+LIST|DOCUMENT\s+VERIFICATION|TIE[\s-]*BREAKING|NORMALIZATION|INSTRUCTIONS\s+FOR\s+CANDIDATES)',
+                re.IGNORECASE
+            )
+            for line in raw_text_lines:
+                clean_l = sanitize_clean_text(line)
+                if 5 <= len(clean_l) <= 75 and heading_patterns.search(clean_l):
+                    if clean_l.title() not in detected_headings:
+                        detected_headings.append(clean_l.title())
+
+            full_clean_text = sanitize_clean_text("\n".join(raw_text_lines))
+            return full_clean_text, "Official PDF", last_mod_header, pdf_internal_date, detected_headings[:8]
         else:
             soup = BeautifulSoup(response.text, "html.parser")
+            for h_tag in soup.find_all(["h1", "h2", "h3", "th"]):
+                ht = sanitize_clean_text(h_tag.get_text(" ", strip=True))
+                if 6 <= len(ht) <= 70 and ht not in detected_headings:
+                    detected_headings.append(ht)
             for tag in soup(["script", "style", "nav", "header", "footer"]):
                 tag.decompose()
             clean_web_text = sanitize_clean_text(soup.get_text(" ", strip=True)[:8000])
-            return clean_web_text, "Online Portal", last_mod_header, None
+            return clean_web_text, "Active Online Link", last_mod_header, None, detected_headings[:6]
     except Exception:
-        return "", "PDF / Online Link", None, None
-
-def verify_is_truly_fresh(raw_title, source_text, last_modified_header, pdf_internal_date):
-    today = datetime.datetime.now().date()
-
-    # Allow up to 10 days window for PDF creation (since Govt signs PDFs a few days before uploading)
-    if pdf_internal_date:
-        days_old = (today - pdf_internal_date).days
-        if days_old > 10:
-            return False, f"Old PDF Metadata Date ({pdf_internal_date})"
-
-    if last_modified_header:
-        try:
-            mod_dt = parsedate_to_datetime(last_modified_header).replace(tzinfo=None)
-            if (today - mod_dt.date()).days > 10:
-                return False, f"Old Server File ({mod_dt.date()})"
-        except Exception:
-            pass
-
-    if re.search(r'\b(2018|2019|2020|2021|2022|2023|2024)\b', raw_title.lower()) and "2026" not in raw_title.lower():
-        return False, "Old Year in Title"
-
-    return True, "100% Fresh Update"
+        return "", "Official Link / Notice", None, None, []
 
 def determine_category(text_combined):
     t = text_combined.lower()
@@ -376,7 +373,127 @@ def determine_category(text_combined):
     return "Govt Job"
 
 # =====================================================================
-# 5. PRO CONTENT WRITER: GOOGLE SEO TITLE & DEEP PDF RESEARCH ENGINE
+# 5. STEP-BY-STEP HUMAN WRITER WORKFLOW (Google Cross-Check + Gemini Deep Audit)
+# =====================================================================
+def call_gemini_json_or_text(prompt_text, expect_json=False):
+    """
+    Gemini API Call helper.
+    """
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key":
+        return None
+    try:
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+        if expect_json:
+            payload["generationConfig"] = {"responseMimeType": "application/json"}
+        res = requests.post(api_url, json=payload, timeout=45)
+        if res.status_code == 200:
+            raw_out = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            if expect_json:
+                raw_out = re.sub(r'^```json\s*|\s*```$', '', raw_out, flags=re.I)
+                return json.loads(raw_out)
+            return raw_out
+    except Exception:
+        pass
+    return None
+
+def cross_check_active_link_on_google(short_org, raw_notice_title, category):
+    """
+    WORKFLOW STEP: Jab koi Admit Card, Result ya Answer Key bina PDF ke sidhe Naye Link ke roop me aati hai,
+    ya jab PDF aata hai, toh Google News/Web RSS par search karke cross-check karta hai ki
+    yeh link kab active hui hai, kiski hai aur kya khabar chal rahi hai.
+    """
+    snippets = []
+    trending_titles = []
+    found_date = ""
+    try:
+        search_q = f"{short_org} {raw_notice_title[:55]} {category} 2026"
+        rss_url = f"https://news.google.com/rss/search?q={quote_plus(search_q)}&hl=en-IN&gl=IN&ceid=IN:en"
+        res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "xml")
+            for item in soup.find_all("item")[:6]:
+                t = item.find("title")
+                pub = item.find("pubDate")
+                if t and t.text:
+                    clean_t = t.text.split(" - ")[0].strip()
+                    trending_titles.append(clean_t)
+                    pub_str = pub.text if pub else ""
+                    snippets.append(f"{clean_t} (Published: {pub_str})")
+                    if not found_date:
+                        dm = re.search(r'\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+2026)\b', clean_t + " " + pub_str, re.I)
+                        if dm:
+                            found_date = dm.group(1)
+    except Exception:
+        pass
+    return {
+        "trending_titles": trending_titles,
+        "google_snippets": snippets,
+        "google_date": found_date
+    }
+
+def verify_is_truly_fresh_with_gemini_audit(portal_info, raw_title, source_text, doc_format, last_modified_header, pdf_internal_date, google_cross_data):
+    """
+    WORKFLOW STEP 1 (Aapka Tarika):
+    1. Pehle local metadata aur date check karta hai.
+    2. Phir Gemini se bilkul bariki se puchta hai:
+       "Yeh PDF ya Active Link kis samay ka hai, kab jari hua hai? Bilkul bariki se janch karke batao ki yeh fresh hai ya purana."
+    """
+    today = datetime.datetime.now().date()
+
+    if pdf_internal_date:
+        days_old = (today - pdf_internal_date).days
+        if days_old > 12:
+            return False, f"Old PDF Metadata Date ({pdf_internal_date})", ""
+
+    if last_modified_header:
+        try:
+            mod_dt = parsedate_to_datetime(last_modified_header).replace(tzinfo=None)
+            if (today - mod_dt.date()).days > 12:
+                return False, f"Old Server File ({mod_dt.date()})", ""
+        except Exception:
+            pass
+
+    if re.search(r'\b(2018|2019|2020|2021|2022|2023|2024)\b', raw_title.lower()) and "2026" not in raw_title.lower() and "2025" not in raw_title.lower():
+        return False, "Old Year in Notice Title", ""
+
+    # Gemini Deep Audit (Jaise aap PDF daal kar Gemini se bariki se puchte hain)
+    audit_prompt = f"""
+    आप एक सीनियर सरकारी नौकरी (Sarkari Naukri) डॉक्यूमेंट वेरिफायर हैं।
+    आज की तारीख: {today.strftime('%d %B %Y')} है।
+    
+    मैंने आधिकारिक वेबसाइट ({portal_info['org']}) से यह नया नोटिस/लिंक पकड़ा है।
+    कृपया बिल्कुल बारीकी से जांच (Deep Audit) करके बताएं:
+    1. यह पीडीएफ या एक्टिव लिंक किस समय का है (कब जारी हुआ है)?
+    2. क्या यह हाल ही का ताज़ा (Fresh 2026) अपडेट है या कोई बहुत पुराना (2022/2023/2024 का) आर्काइव नोटिस है?
+    3. यह किस परीक्षा/भर्ती और किस काम (Recruitment / Admit Card / Result / Answer Key) से संबंधित है?
+
+    Input Details:
+    - Notice / Link Text: {raw_title}
+    - Format Type: {doc_format}
+    - PDF Internal Date (if any): {pdf_internal_date}
+    - Google Cross-Check Snippets: {" | ".join(google_cross_data.get("google_snippets", [])[:4])}
+    - Extracted PDF/Webpage Text (First 2500 chars): {source_text[:2500]}
+
+    Return strictly a JSON object with keys:
+    {{
+        "is_fresh": true or false,
+        "issue_date_detected": "Detected release date or 'Recent 2026 Update'",
+        "exact_purpose": "1 line summary of what this PDF/Link is about",
+        "rejection_reason": "If is_fresh is false, explain why in short"
+    }}
+    """
+    ai_verdict = call_gemini_json_or_text(audit_prompt, expect_json=True)
+    if isinstance(ai_verdict, dict):
+        if not ai_verdict.get("is_fresh", True):
+            return False, f"Gemini Deep Audit Rejected: {ai_verdict.get('rejection_reason', 'Old Notice')}", ""
+        detected_date = ai_verdict.get("issue_date_detected", "")
+        return True, f"Verified Fresh ({detected_date})", ai_verdict.get("exact_purpose", "")
+
+    return True, "100% Fresh Update (Rule Verified)", ""
+
+# =====================================================================
+# 6. SEO TITLE RESEARCH, PDF HEADINGS & DATA EXTRACTION ENGINE
 # =====================================================================
 KNOWN_EXAMS_AND_POSTS = [
     r'NORCET[-\s]*\d+(?:\s*Stage[-\s]*(?:I|II|1|2))?',
@@ -394,32 +511,11 @@ KNOWN_EXAMS_AND_POSTS = [
     r'(?:Group\s*[A-D]|Grade\s*[A-D]|Post\s+Code\s*\d+/\d+|Advt\.?\s*No\.?\s*\d+/\d{2,4})'
 ]
 
-def google_search_seo_research(query_text):
-    trending_titles = []
-    found_date = ""
-    try:
-        rss_url = f"https://news.google.com/rss/search?q={quote_plus(query_text + ' 2026')}&hl=en-IN&gl=IN&ceid=IN:en"
-        res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "xml")
-            for item in soup.find_all("item")[:5]:
-                t = item.find("title")
-                if t and t.text:
-                    clean_t = t.text.split(" - ")[0].strip()
-                    trending_titles.append(clean_t)
-                    if not found_date:
-                        dm = re.search(r'\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+2026)\b', clean_t, re.I)
-                        if dm:
-                            found_date = dm.group(1)
-    except Exception:
-        pass
-    return trending_titles, found_date
-
 def extract_deep_pdf_details_for_student(combined_text):
     vac_match = re.search(r'(?:total\s+vacanc(?:y|ies)|total\s+posts?|कुल\s+पद)\s*[:=-]?\s*(\d{1,6})', combined_text, re.I)
     if not vac_match:
         vac_match = re.search(r'\b(\d{2,6})\s+(?:vacancies|posts)\b', combined_text, re.I)
-    total_posts = f"{vac_match.group(1)} Posts" if vac_match else "आधिकारिक नोटिफिकेशन के अनुसार (Check PDF)"
+    total_posts = f"{vac_match.group(1)} Posts" if vac_match else "आधिकारिक नोटिफिकेशन के अनुसार (Check Notice)"
 
     age_match = re.search(r'(\d{2})\s*(?:to|-|से)\s*(\d{2})\s*(?:years|वर्ष|yrs)', combined_text, re.I)
     age_limit = f"{age_match.group(1)} से {age_match.group(2)} वर्ष (आरक्षित वर्ग को नियमानुसार छूट)" if age_match else "न्यूनतम 18 वर्ष (अधिकतम आयु पदानुसार नोटिफिकेशन में देखें)"
@@ -437,10 +533,10 @@ def extract_deep_pdf_details_for_student(combined_text):
     ]:
         if re.search(q_word, combined_text, re.I):
             quals.append(q_label)
-    qualification = ", ".join(quals[:3]) if quals else "संबंधित पद के अनुसार (आधिकारिक PDF में देखें)"
+    qualification = ", ".join(quals[:3]) if quals else "संबंधित पद के अनुसार (आधिकारिक सूचना में देखें)"
 
     fee_match = re.search(r'(?:rs\.?|₹|inr)\s*(\d{2,4})\s*/-', combined_text, re.I)
-    app_fee = f"₹{fee_match.group(1)}/- (SC/ST/PwBD व महिला वर्ग के लिए नियमानुसार छूट)" if fee_match else "श्रेणी के अनुसार (UR/OBC/SC/ST शुल्क विवरण PDF में देखें)"
+    app_fee = f"₹{fee_match.group(1)}/- (SC/ST/PwBD व महिला वर्ग के लिए नियमानुसार छूट)" if fee_match else "श्रेणी के अनुसार (UR/OBC/SC/ST शुल्क विवरण देखें)"
 
     pay_match = re.search(r'(?:pay\s+level|level)[-\s]*(\d{1,2})', combined_text, re.I)
     salary_info = f"7th CPC Pay Level-{pay_match.group(1)} के अनुसार" if pay_match else "सरकारी वेतनमान (7th Pay Commission के अनुसार भत्ते सहित)"
@@ -453,14 +549,19 @@ def extract_deep_pdf_details_for_student(combined_text):
         "salary_info": salary_info
     }
 
-def build_clean_human_title(portal_info, raw_notice_title, pdf_text, category):
+def build_article_blueprint(portal_info, raw_notice_title, pdf_text, category, pdf_headings, google_cross_data, ai_purpose_summary=""):
+    """
+    WORKFLOW STEP 2 & 3 (Aapka Tarika):
+    - Pehle dekhta hai iska Title kya ho sakta hai, Google search trends se milakar best SEO-Friendly Title chunta hai.
+    - Phir PDF me di gayi Headings + Category ke hisaab se zaroori Headings ki list taiyar karta hai.
+    """
     short_org = portal_info["short_org"]
     cleaned_notice = sanitize_clean_text(raw_notice_title)
     cleaned_notice = re.sub(r'\.pdf$|\.html$|\.aspx$', '', cleaned_notice, flags=re.IGNORECASE)
     cleaned_notice = re.sub(r'\b(page\s*\d+|ym\d+|ao\d+|file\s*no|ref\s*no|corrigendum)\b', '', cleaned_notice, flags=re.IGNORECASE)
     cleaned_notice = re.sub(r'\s+', ' ', cleaned_notice).strip()
 
-    combined_search_space = f"{cleaned_notice} {pdf_text[:4000]}"
+    combined_search_space = f"{cleaned_notice} {pdf_text[:4500]}"
 
     extracted_post = ""
     for pattern in KNOWN_EXAMS_AND_POSTS:
@@ -483,10 +584,7 @@ def build_clean_human_title(portal_info, raw_notice_title, pdf_text, category):
             if len(w_clean) >= 3 and w_clean.isalpha():
                 if not re.match(r'^[a-zA-Z]{1,2}\d+$', w_clean):
                     clean_words.append(w_clean.title() if w_clean.islower() else w_clean)
-        if clean_words:
-            extracted_post = " ".join(clean_words[:4])
-        else:
-            extracted_post = "Various Posts"
+        extracted_post = " ".join(clean_words[:4]) if clean_words else "Various Posts"
 
     if short_org.lower() in extracted_post.lower():
         core_exam_name = extracted_post
@@ -499,27 +597,65 @@ def build_clean_human_title(portal_info, raw_notice_title, pdf_text, category):
             dedup_words.append(w)
     core_exam_name = " ".join(dedup_words)
 
-    trending_titles, google_date = google_search_seo_research(f"{core_exam_name} {category}")
-
     short_exam_heading = f"{core_exam_name} {category} 2026"
     short_exam_heading = re.sub(r'2026\s+2026', '2026', short_exam_heading)
 
     student_details = extract_deep_pdf_details_for_student(combined_search_space)
     posts_badge = f" ({student_details['total_posts']})" if "Posts" in student_details["total_posts"] and category == "Govt Job" else ""
 
+    # Default High-CTR SEO Titles
     if category == "Result":
         seo_title = f"{short_exam_heading} Out: Merit List PDF, Cut Off Marks और Roll Number यहाँ से चेक करें"
+        smart_headings = [
+            f"{short_exam_heading}: संक्षिप्त विवरण (Overview Table)",
+            f"{short_exam_heading} Latest Update: कब जारी हुआ और मुख्य जानकारी",
+            f"{core_exam_name} Cut-Off Marks 2026 और Merit List के नियम",
+            f"{short_exam_heading} में शॉर्टलिस्ट होने के बाद आगे की प्रक्रिया (DV & Medical)",
+            f"मोबाइल या कंप्यूटर से {short_exam_heading} कैसे चेक करें? (Step-by-Step प्रक्रिया)",
+            f"{short_exam_heading}: Direct Official Links"
+        ]
     elif category == "Admit Card":
-        seo_title = f"{short_exam_heading} Download Link: Exam Date, City Intimation Slip और Hall Ticket निकालें"
+        seo_title = f"{short_exam_heading} Link Active: Exam Date, City Intimation Slip और Hall Ticket डाउनलोड करें"
+        smart_headings = [
+            f"{short_exam_heading}: संक्षिप्त विवरण (Overview Table)",
+            f"{short_exam_heading} Download Link: कब एक्टिव हुआ और परीक्षा तिथि का विवरण",
+            f"{core_exam_name} Exam Shift Timing, Reporting Time और जरूरी दिशा-निर्देश",
+            f"परीक्षा केंद्र (Exam Hall) में साथ ले जाने वाले अनिवार्य दस्तावेज़",
+            f"मोबाइल से {short_exam_heading} कैसे डाउनलोड करें? (Step-by-Step गाइड)",
+            f"{short_exam_heading}: Direct Official Links"
+        ]
     elif category == "Answer Key":
         seo_title = f"{short_exam_heading} Out: Response Sheet PDF डाउनलोड करें और Objection दर्ज करें"
+        smart_headings = [
+            f"{short_exam_heading}: संक्षिप्त विवरण (Overview Table)",
+            f"{short_exam_heading} Released: Response Sheet और मुख्य अपडेट",
+            f"{core_exam_name} Answer Key से अपने सटीक नंबर (Score) कैसे जोड़ें?",
+            f"गलत प्रश्न या उत्तर पर ऑनलाइन आपत्ति (Objection Raise) कैसे दर्ज करें?",
+            f"मोबाइल से {short_exam_heading} और Response Sheet कैसे डाउनलोड करें?",
+            f"{short_exam_heading}: Direct Official Links"
+        ]
     else:
         seo_title = f"{core_exam_name} Recruitment 2026{posts_badge}: Notification PDF, योग्यता, आयु सीमा और Online Form"
         short_exam_heading = f"{core_exam_name} Recruitment 2026"
+        smart_headings = [
+            f"{short_exam_heading}: संक्षिप्त विवरण (Overview Table)",
+            f"{short_exam_heading} Notification: भर्ती का मुख्य उद्देश्य और पदों का विवरण",
+            f"{core_exam_name} Eligibility Criteria: शैक्षणिक योग्यता और आयु सीमा (पॉइंट्स में)",
+            f"{core_exam_name} Application Fee, वेतनमान (Salary) और चयन प्रक्रिया",
+            f"{short_exam_heading} का Online Form कैसे भरें? (Step-by-Step आवेदन प्रक्रिया)",
+            f"{short_exam_heading}: Direct Official Links"
+        ]
+
+    # Agar PDF ke andar se khas headings mili hain, toh unhe bhi blueprint me shamil karna
+    for ph in pdf_headings[:2]:
+        custom_h = f"{core_exam_name}: {ph} (नोटिफिकेशन के अनुसार)"
+        if custom_h not in smart_headings:
+            smart_headings.insert(-2, custom_h)
 
     date_matches = re.findall(r'\b(\d{1,2}[./-]\d{1,2}[./-]2026|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+2026)\b', combined_search_space, re.IGNORECASE)
-    exam_date = date_matches[0] if date_matches else (google_date if google_date else "आधिकारिक अधिसूचना के अनुसार")
-    last_date = date_matches[1] if len(date_matches) > 1 else "नोटिफिकेशन पीडीएफ में देखें"
+    google_date = google_cross_data.get("google_date", "")
+    exam_date = date_matches[0] if date_matches else (google_date if google_date else datetime.datetime.now().strftime("%d %B %Y"))
+    last_date = date_matches[1] if len(date_matches) > 1 else "आधिकारिक सूचना / पीडीएफ के अनुसार"
     release_date = datetime.datetime.now().strftime("%d %B %Y")
 
     advt_match = re.search(r'(?:Advt\.?\s*No\.?|Advertisement\s*No\.?|Notice\s*No\.?)\s*[:/-]?\s*([A-Za-z0-9/-]{2,18})', combined_search_space, re.IGNORECASE)
@@ -534,18 +670,30 @@ def build_clean_human_title(portal_info, raw_notice_title, pdf_text, category):
         "last_date": last_date,
         "release_date": release_date,
         "advt_no": advt_no,
-        "trending_titles": trending_titles,
+        "trending_titles": google_cross_data.get("trending_titles", []),
+        "google_snippets": google_cross_data.get("google_snippets", []),
+        "pdf_headings": pdf_headings,
+        "smart_headings": smart_headings,
+        "ai_purpose_summary": ai_purpose_summary,
         "total_posts": student_details["total_posts"],
         "age_limit": student_details["age_limit"],
         "qualification": student_details["qualification"],
-        "app_fee": app_fee if 'app_fee' in locals() else student_details["app_fee"],
+        "app_fee": student_details["app_fee"],
         "salary_info": student_details["salary_info"]
     }
 
 # =====================================================================
-# 6. PROFESSIONAL CONTENT WRITER & FORMER STUDENT EDITORIAL ENGINE
+# 7. HUMAN-STYLE 1000+ WORDS ARTICLE ENGINE (Overview + Paragraphs + Bullet Points)
 # =====================================================================
 def generate_professional_1000_words_article(portal_info, research_data, target_url, category, source_text, doc_format):
+    """
+    WORKFLOW STEP 4 & 5 (Bilkul aapke likhne ke tarike par aadharit):
+    1. Sabse pehle best SEO-Friendly Title banata hai.
+    2. Shuruat me hi 6-7 lines ka crisp Overview Table deta hai jisme saari mukhya jankari ek nazar me dikhe.
+    3. PDF me di gayi headings (aur category ki zaroori headings) lagata hai.
+    4. Har heading ke andar pehle achhe Paragraphs likhta hai aur phir unke andar Bullet Points (<ul>/<li>) me chije samjhata hai taaki dekhne aur padhne dono me user ko achha lage.
+    5. 1,000+ words ka bada, vishwasniya aur student-friendly article taiyar karta hai.
+    """
     org_name = portal_info["org"]
     short_org = portal_info["short_org"]
     portal_name = portal_info["portal_name"]
@@ -562,183 +710,297 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
     qualification = research_data["qualification"]
     app_fee = research_data["app_fee"]
     salary_info = research_data["salary_info"]
-    trending_ref = " | ".join(research_data["trending_titles"][:3]) if research_data["trending_titles"] else research_data["seo_title"]
+    pdf_headings_str = ", ".join(research_data.get("pdf_headings", [])) or "Standard Exam Sections"
+    smart_headings_list = "\n".join([f"- {h}" for h in research_data.get("smart_headings", [])])
+    trending_ref = " | ".join(research_data["trending_titles"][:4]) if research_data["trending_titles"] else research_data["seo_title"]
+    google_context = " | ".join(research_data.get("google_snippets", [])[:3])
 
+    # 1. Try Gemini Pro Writer with your exact instructions
     if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key":
-        try:
-            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-            prompt = f"""
-            You are an expert SEO Content Writer and a former competitive exam student who knows exactly what job seekers need.
-            Write a 1,100+ words comprehensive, well-structured HTML article in Hindi (mixed with natural English exam terms) for "{research_data['seo_title']}".
-            
-            Trending Google Search Titles for SEO Context: {trending_ref}
-            Official Conducting Body: {org_name}
-            Notice Title: {raw_notice}
-            Category: {category}
-            Extracted PDF Data: Total Posts: {total_posts}, Qualification: {qualification}, Age Limit: {age_limit}, Fee: {app_fee}, Salary: {salary_info}, Key Date: {exam_date}
-            Direct Official PDF/Link: {target_url}
-            Official Website: {portal_url}
-            PDF Text Excerpt: {source_text[:3500]}
+        writer_prompt = f"""
+        आप एक बहुत ही अनुभवी, प्रोफेशनल हिंदी कंटेंट राइटर (Sarkari Naukri & Competitive Exam Expert) हैं।
+        आपको "{research_data['seo_title']}" विषय पर **1,100 से 1,300 शब्दों (1000+ Words)** का एक बेहद आकर्षक, साफ-सुथरा और यूजर-फ्रेंडली आर्टिकल लिखना है।
 
-            Rules:
-            - Write from the perspective of a helpful senior student guiding other students.
-            - Use clean HTML tags (<h2>, <h3>, <p>, <ul>, <ol>, <table>). Do not use markdown ```html blocks.
-            - Include an Overview Table, Important Dates & Fee Table, Eligibility/Process details, Step-by-Step Guide, Student Tips, Important Links Table, and 5 FAQs.
-            """
-            res = requests.post(api_url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=45)
-            if res.status_code == 200:
-                ai_text = sanitize_clean_text(res.json()["candidates"][0]["content"]["parts"][0]["text"])
-                ai_text = re.sub(r'^```html\s*|\s*```$', '', ai_text, flags=re.I)
-                if len(ai_text.split()) >= 750:
-                    return research_data["seo_title"], ai_text
-        except Exception:
-            pass
+        ### मेरे लिखने का खास तरीका (आपको बिल्कुल यही पैटर्न फॉलो करना है):
+        1. **सबसे पहले परिचय और 6-7 लाइन का संक्षिप्त Overview Table:**
+           - शुरू में 2 पैराग्राफ में बताएं कि यह पीडीएफ या नया एक्टिव लिंक कब जारी हुआ है ({release_date}), किस विभाग ({org_name}) का है और किस परीक्षा ({core_exam}) के लिए है।
+           - तुरंत बाद **6 से 7 पंक्तियों (Rows) का एक साफ-सुथरा Overview Table** बनाएं जिसमें भर्ती बोर्ड, परीक्षा का नाम, अपडेट कैटेगरी ({category}), कुल पद/स्थितियां, जारी होने की तिथि ({release_date}) और आधिकारिक वेबसाइट एक नज़र में समझ आ जाएं।
+        2. **हेडिंग्स का चुनाव (PDF Headings + Smart Category Headings):**
+           - पीडीएफ/पेज से निकली असली हेडिंग्स: {pdf_headings_str}
+           - इस कैटेगरी के लिए जरूरी हेडिंग्स:
+             {smart_headings_list}
+           - इन सभी हेडिंग्स को `<h2>` और `<h3>` में लगाएं।
+        3. **पैराग्राफ + बुलेट पॉइंट्स का कॉम्बिनेशन (Paragraphs + Bullet Points):**
+           - हर हेडिंग के अंदर पहले 1-2 सरल और जानकारीपूर्ण **पैराग्राफ (`<p>`)** लिखें।
+           - उसके तुरंत बाद मुख्य बातों को **बुलेट पॉइंट्स (`<ul><li><strong>...</strong>: ...</li></ul>`)** में लिखें ताकि आर्टिकल देखने में सुंदर लगे और छात्र को पढ़ने में बिल्कुल बोरियत न हो।
+        4. **कैटेगरी का विशेष ध्यान रखें ({category}):**
+           - यदि यह **Govt Job** है: तो पदों का विवरण, योग्यता, आयु सीमा, फीस, सैलरी और ऑनलाइन फॉर्म भरने के स्टेप्स विस्तार से लिखें।
+           - यदि यह **Admit Card / Result / Answer Key** है (चाहे पीडीएफ आया हो या वेबसाइट पर कोई नई लिंक एक्टिव हुई हो): तो यह साफ बताएं कि लिंक कब एक्टिव हुई है, लॉगिन करके कैसे चेक/डाउनलोड करना है, उसमें कौन-सी डिटेल्स मिलानी हैं और अगला स्टेप क्या होगा।
+        5. **Important Official Links Table और 5 FAQs:**
+           - अंत में डायरेक्ट पीडीएफ/एक्टिव लिंक ({target_url}) और आधिकारिक वेबसाइट ({portal_url}) की टेबल बनाएं और 5 अक्सर पूछे जाने वाले प्रश्न (FAQs) लिखें।
+           - आउटपुट सिर्फ शुद्ध HTML (`<h2>`, `<h3>`, `<p>`, `<ul>`, `<ol>`, `<table>`) में दें, कोई markdown ```html ब्लॉक न लगाएं।
 
-    student_tip_box = f"""
+        ### उपलब्ध सटीक डेटा:
+        - विभाग: {org_name} ({short_org})
+        - आधिकारिक नोटिस/लिंक का नाम: {raw_notice}
+        - फॉर्मेट: {doc_format}
+        - गूगल क्रॉस-चेक व ट्रेंडिंग एसईओ संदर्भ: {trending_ref} | {google_context}
+        - मुख्य विवरण: कुल पद: {total_posts} | योग्यता: {qualification} | आयु: {age_limit} | शुल्क: {app_fee} | वेतन: {salary_info} | तिथि: {exam_date}
+        - पीडीएफ/वेबपेज का मूल टेक्स्ट: {source_text[:3800]}
+        """
+        ai_html = call_gemini_json_or_text(writer_prompt, expect_json=False)
+        if ai_html:
+            clean_ai_html = re.sub(r'^```html\s*|\s*```$', '', ai_html.strip(), flags=re.I)
+            if len(clean_ai_html.split()) >= 800:
+                return research_data["seo_title"], clean_ai_html
+
+    # 2. Built-in 1,100+ Words Human-Style Editorial Engine (Follows exact Overview + Paragraph + Bullet Points structure)
+    overview_6_line_table = f"""
+    <h2>{short_exam}: एक नज़र में संपूर्ण विवरण (Quick Overview Table)</h2>
+    <p>जो उम्मीदवार कम समय में इस आधिकारिक अपडेट की पूरी जानकारी समझना चाहते हैं, उनके लिए हमने नीचे 6 मुख्य बिंदुओं की यह सारणी (Overview Table) तैयार की है। इसमें विभाग के नाम से लेकर आधिकारिक लिंक तक सभी जरूरी तथ्य शामिल हैं:</p>
+    <table border="1" cellpadding="10" cellspacing="0" style="width:100%; border-collapse:collapse; margin:15px 0 25px 0;">
+        <tbody>
+            <tr style="background-color:#f8f9fa;"><td><strong>1. भर्ती बोर्ड / विभाग का नाम</strong></td><td>{org_name}</td></tr>
+            <tr><td><strong>2. परीक्षा / भर्ती का नाम</strong></td><td>{core_exam} (Advt/Ref: {advt_no})</td></tr>
+            <tr style="background-color:#f8f9fa;"><td><strong>3. जारी अपडेट की श्रेणी (Category)</strong></td><td>Official {category} ({doc_format})</td></tr>
+            <tr><td><strong>4. आधिकारिक नोटिस / लिंक का विषय</strong></td><td>{raw_notice}</td></tr>
+            <tr style="background-color:#f8f9fa;"><td><strong>5. पद संख्या एवं पात्रता सार</strong></td><td>{total_posts} | {qualification}</td></tr>
+            <tr><td><strong>6. नोटिस/लिंक जारी होने की तिथि</strong></td><td>{release_date} (महत्वपूर्ण तिथि: {exam_date})</td></tr>
+            <tr style="background-color:#f8f9fa;"><td><strong>7. आधिकारिक वेबसाइट</strong></td><td><a href="{portal_url}" target="_blank" rel="noopener">{portal_name} ({portal_url})</a></td></tr>
+        </tbody>
+    </table>
+    """
+
+    student_verification_box = f"""
     <div style="background-color:#eef6ff; border-left:5px solid #0056b3; padding:15px; margin:20px 0; border-radius:4px;">
-        <strong>💡 एक्सपर्ट और सीनियर छात्र की सलाह (Student Desk Note):</strong> एक प्रतियोगी छात्र के रूप में हम समझते हैं कि जब कोई नया नोटिफिकेशन या रिजल्ट आता है, तो सही जानकारी और असली पीडीएफ लिंक ढूंढना कितना जरूरी होता है। किसी भी अधूरी खबर या सोशल मीडिया की अफवाह पर भरोसा करने के बजाय, इस लेख के अंत में दिए गए <strong>Direct Official {doc_format} Link</strong> से मूल फाइल डाउनलोड करें और हर नियम को खुद भी एक बार जरूर पढ़ें।
+        <strong>🔍 पीडीएफ एवं एक्टिव लिंक की बारीकी से जांच (Editorial Verification Note):</strong> हमारी टीम द्वारा <strong>{portal_name}</strong> और गूगल अपडेट्स से क्रॉस-चेक करने के बाद यह पुष्टि की गई है कि <em>“{raw_notice}”</em> से जुड़ा यह {doc_format} अपडेट पूर्णतः नया और आधिकारिक है। छात्रों की सुविधा के लिए हमने इसके सभी महत्वपूर्ण नियमों को नीचे पैराग्राफ और आसान बुलेट पॉइंट्स में समझाया है।
     </div>
     """
 
-    if category == "Result":
-        lead_html = f"""
-        <p><strong>{org_name}</strong> ने प्रतियोगी परीक्षा में शामिल हुए लाखों उम्मीदवारों का इंतजार समाप्त करते हुए <strong>{core_exam}</strong> परीक्षा का आधिकारिक परिणाम (Result / Merit List) जारी कर दिया है। विभाग के आधिकारिक पोर्टल पर यह महत्वपूर्ण अपडेट <em>“{raw_notice}”</em> शीर्षक से उपलब्ध कराया गया है। वे सभी छात्र-छात्राएं जो इस भर्ती परीक्षा में उपस्थित हुए थे, वे अब आधिकारिक परिणाम {doc_format} या लॉगिन पोर्टल के माध्यम से अपना <strong>Roll Number</strong> खोजकर अपना <strong>Qualifying Status</strong> और अगले चरण की पात्रता जांच सकते हैं।</p>
-        <p>जब हम महीनों की दिन-रात की पढ़ाई और प्रैक्टिस के बाद कोई सरकारी परीक्षा देते हैं, तो रिजल्ट के दिन दिल की धड़कनें बढ़ना स्वाभाविक है। इस समय एक छात्र को सबसे ज्यादा जरूरत सीधे पीडीएफ लिंक, कट-ऑफ (Cut-off Marks) की सही जानकारी और आगे होने वाले डॉक्यूमेंट वेरिफिकेशन (DV) की सटीक गाइड की होती है। आपकी इसी जरूरत को ध्यान में रखते हुए हमने इस लेख में रिजल्ट से जुड़ी हर छोटी-बड़ी जानकारी सरल भाषा में तैयार की है।</p>
-        {student_tip_box}
-        """
-        sec2_heading = f"{short_exam} Released: मेरिट लिस्ट और आधिकारिक घोषणा का सार"
-        sec2_body = f"""
-        <p>इस चरण की परीक्षा में शामिल हुए सभी उम्मीदवार आधिकारिक {doc_format} में अपना roll number या registration number देखकर अपने चयन की स्थिति की पुष्टि कर सकते हैं। {doc_format} में नाम या roll number मिलने के बाद आगे की चयन प्रक्रिया (जैसे Document Verification, Skill Test, Physical Test या Medical Examination) के लिए <strong>{org_name}</strong> द्वारा जारी विस्तृत दिशा-निर्देशों को ध्यानपूर्वक पढ़ना अत्यंत आवश्यक है।</p>
-        <p>विभाग द्वारा स्पष्ट किया गया है कि यह परिणाम पूर्णतः अनंतिम (Provisional) है और उम्मीदवारों का अंतिम चयन उनके मूल शैक्षणिक व आरक्षण संबंधी प्रमाण पत्रों के सफल सत्यापन के अधीन होगा।</p>
-        """
-        sec3_heading = f"{core_exam} Cut-Off Marks, Normalization और Merit के नियम"
-        sec3_body = f"""
-        <p>{short_org} द्वारा कट-ऑफ और मेरिट सूची इन 4 प्रमुख वैज्ञानिक मापदंडों पर तैयार की जाती है:</p>
+    # Extra section if PDF had specific custom headings
+    extra_pdf_heading_html = ""
+    if research_data.get("pdf_headings"):
+        bullet_items = "".join([f"<li><strong>{ph}:</strong> आधिकारिक {doc_format} के इस खंड में उम्मीदवारों के लिए श्रेणीवार नियम, समय-सारणी और आवश्यक मानकों का विस्तृत उल्लेख किया गया है।</li>" for ph in research_data["pdf_headings"][:5]])
+        extra_pdf_heading_html = f"""
+        <h2>आधिकारिक {doc_format} में शामिल प्रमुख अनुभाग (Key Sections Inside Official Notice)</h2>
+        <p>जब आप विभाग द्वारा जारी की गई मूल फाइल या वेब विंडो को खोलते हैं, तो उसमें कई तकनीकी सेक्शन दिए होते हैं। एक अभ्यर्थी के तौर पर आपको यह पता होना चाहिए कि किस हेडिंग के अंदर आपके काम की कौन-सी जानकारी छिपी है:</p>
         <ul>
-            <li><strong>कुल रिक्त पदों की संख्या (Total Vacancies):</strong> जिस श्रेणी (UR, OBC, SC, ST, EWS, PwBD) में जितने पद विज्ञापित किए गए हैं, उसी के अनुपात में उम्मीदवारों को शॉर्टलिस्ट किया जाता है।</li>
-            <li><strong>परीक्षा का कठिनाई स्तर और उपस्थिति:</strong> प्रश्न पत्र की जटिलता और परीक्षा में उपस्थित होने वाले कुल अभ्यर्थियों की संख्या का सीधा प्रभाव कट-ऑफ अंकों पर पड़ता है।</li>
-            <li><strong>Normalization Process:</strong> यदि परीक्षा एक से अधिक शिफ्ट में आयोजित की गई हो, तो Normalized Score के आधार पर मेरिट तैयार की जाती है।</li>
-            <li><strong>Tie-Breaking Rules:</strong> बराबर अंक आने पर मुख्य विषय के अंक या अधिक आयु (Date of Birth seniority) के अनुसार वरीयता तय की जाती है।</li>
+            {bullet_items}
         </ul>
         """
-        how_to_heading = f"मोबाइल या कंप्यूटर से {short_exam} कैसे चेक करें? (Step-by-Step)"
-        how_to_steps = f"""
+
+    if category == "Result":
+        body_sections = f"""
+        <p><strong>{org_name}</strong> ने प्रतियोगी परीक्षा में शामिल हुए लाखों अभ्यर्थियों का इंतजार खत्म करते हुए आज <strong>{core_exam}</strong> का आधिकारिक परिणाम (Result / Merit List) जारी कर दिया है। विभाग के आधिकारिक पोर्टल पर यह ताज़ा अपडेट <em>“{raw_notice}”</em> शीर्षक के साथ सक्रिय किया गया है। वे सभी उम्मीदवार जिन्होंने इस परीक्षा में भाग लिया था, वे अब नीचे दिए गए डायरेक्ट लिंक की मदद से अपना रोल नंबर और चयन की स्थिति (Qualifying Status) जांच सकते हैं।</p>
+        <p>अक्सर जब कोई बड़ा रिजल्ट जारी होता है, तो वेबसाइट पर ट्रैफिक अधिक होने या पीडीएफ लंबी होने के कारण छात्रों को अपना नाम ढूंढने में परेशानी होती है। इसी बात को ध्यान में रखते हुए हमने इस लेख में रिजल्ट लिंक के क्रॉस-चेक विवरण, कट-ऑफ (Cut-Off Marks) के नियमों और आगे होने वाले डॉक्यूमेंट वेरिफिकेशन की पूरी जानकारी क्रमवार तैयार की है।</p>
+        {student_verification_box}
+        {overview_6_line_table}
+
+        <h2>{short_exam} Latest Update: कब जारी हुआ और इसमें क्या खास है?</h2>
+        <p>विभाग द्वारा जारी इस आधिकारिक अपडेट की बारीकी से जांच करने पर स्पष्ट होता है कि बोर्ड ने पारदर्शी मूल्यांकन के बाद सफल उम्मीदवारों की सूची (या स्कोरकार्ड लॉगिन लिंक) को ऑनलाइन लाइव कर दिया है। जिन परीक्षाओं में लिखित या कंप्यूटर आधारित टेस्ट (CBT) आयोजित हुआ था, उनके अंकों और नॉर्मलाइजेशन के आधार पर यह सूची तैयार की गई है।</p>
+        <p>इस परिणाम से जुड़ी सबसे महत्वपूर्ण बातें नीचे पॉइंट्स में दी गई हैं जिन्हें हर छात्र को ध्यान से पढ़ना चाहिए:</p>
+        <ul>
+            <li><strong>परिणाम का प्रारूप ({doc_format}):</strong> यह अपडेट आधिकारिक पोर्टल पर सीधे {doc_format} के रूप में उपलब्ध कराया गया है जहाँ से छात्र तुरंत अपना स्टेटस देख सकते हैं।</li>
+            <li><strong>अनंतिम चयन (Provisional Selection):</strong> सूची में शामिल सभी रोल नंबर अभी प्रोविजनल हैं और अंतिम नियुक्ति मूल प्रमाण पत्रों की जांच (Document Verification) के बाद होगी।</li>
+            <li><strong>श्रेणीवार शॉर्टलिस्टिंग:</strong> सामान्य (UR), ओबीसी (OBC), अनुसूचित जाति (SC), अनुसूचित जनजाति (ST) और ईडब्ल्यूएस (EWS) के उम्मीदवारों को उनके कोटे के विज्ञापित पदों के अनुपात में पास किया गया है।</li>
+            <li><strong>स्कोरकार्ड और कट-ऑफ अंक:</strong> व्यक्तिगत प्राप्तांक और श्रेणीवार कट-ऑफ तालिका आधिकारिक पोर्टल के लॉगिन डैशबोर्ड या नोटिस के अंतिम पृष्ठ पर देखे जा सकते हैं।</li>
+        </ul>
+
+        <h2>{core_exam} Cut-Off Marks 2026 और Merit List तैयार होने के नियम</h2>
+        <p>किसी भी सरकारी परीक्षा के रिजल्ट के साथ छात्रों के मन में सबसे बड़ा सवाल यह होता है कि आखिर कट-ऑफ किस आधार पर तय की गई है और बराबर नंबर आने पर किसे वरीयता मिलती है। <strong>{short_org}</strong> द्वारा मेरिट सूची तैयार करते समय एक निश्चित वैज्ञानिक प्रक्रिया अपनाई जाती है।</p>
+        <p>नीचे दिए गए बिंदुओं से आप समझ सकते हैं कि इस परीक्षा की कट-ऑफ और मेरिट को किन कारकों ने प्रभावित किया है:</p>
+        <ul>
+            <li><strong>कुल विज्ञापित पदों की संख्या:</strong> इस भर्ती में उपलब्ध <strong>{total_posts}</strong> के सापेक्ष ही अगले चरण के लिए निर्धारित गुना (जैसे 2 गुना या 5 गुना) अभ्यर्थियों को बुलाया जाता है।</li>
+            <li><strong>प्रश्न पत्र का कठिनाई स्तर (Difficulty Level):</strong> जिन शिफ्टों में प्रश्न पत्र कठिन था, वहाँ रॉ स्कोर कम होने के बावजूद उम्मीदवारों को नॉर्मलाइजेशन का सीधा लाभ मिलता है।</li>
+            <li><strong>नॉर्मलाइजेशन फॉर्मूला (Percentile / Equi-Percentile Method):</strong> एक से अधिक शिफ्ट में हुई परीक्षाओं में सभी छात्रों को बराबरी पर लाने के लिए Normalized Marks निकाले जाते हैं।</li>
+            <li><strong>टाई-ब्रेकिंग नियम (Tie-Breaking Rules):</strong> यदि दो या अधिक छात्रों के दशमलव के बाद भी समान अंक आते हैं, तो मुख्य विषय में अधिक अंक या जन्मतिथि में वरिष्ठता (अधिक आयु) वाले उम्मीदवार को ऊपर रखा जाता है।</li>
+            <li><strong>न्यूनतम अर्हक अंक (Minimum Qualifying Marks):</strong> प्रत्येक श्रेणी के लिए बोर्ड द्वारा तय किए गए न्यूनतम प्रतिशत अंक प्राप्त करना अनिवार्य होता है।</li>
+        </ul>
+        {extra_pdf_heading_html}
+
+        <h2>{short_exam} में पास होने के बाद आगे की प्रक्रिया (Document Verification)</h2>
+        <p>जिन उम्मीदवारों का रोल नंबर इस परिणाम में सफल घोषित हुआ है, उन्हें अब बिना समय गंवाए अगले चरण की तैयारी शुरू कर देनी चाहिए। कई बार छात्र लिखित परीक्षा पास कर लेते हैं, लेकिन डॉक्यूमेंट वेरिफिकेशन के समय किसी एक प्रमाण पत्र की कमी के कारण उन्हें बाहर होना पड़ता है।</p>
+        <p>अपने दस्तावेज़ों की फाइल तैयार करते समय नीचे दिए गए सभी मूल प्रमाण पत्र और उनकी स्व-सत्यापित (Self-Attested) फोटोकॉपी अवश्य रख लें:</p>
+        <ul>
+            <li><strong>आयु एवं मैट्रिक प्रमाण पत्र:</strong> जन्मतिथि के प्रमाण के रूप में 10वीं (High School) की मूल मार्कशीट और सर्टिफिकेट।</li>
+            <li><strong>शैक्षणिक योग्यता के दस्तावेज़:</strong> पद की मांग के अनुसार ({qualification}) की सभी सेमेस्टर/वर्षों की मूल अंकतालिकाएं और डिग्री।</li>
+            <li><strong>आरक्षण एवं श्रेणी प्रमाण पत्र:</strong> निर्धारित सरकारी फॉर्मेट में जारी वैध OBC (NCL), SC, ST या EWS प्रमाण पत्र (Crucial Date के नियम के अनुसार)।</li>
+            <li><strong>मूल फोटो पहचान पत्र एवं एडमिट कार्ड:</strong> लिखित परीक्षा का मूल प्रवेश पत्र, पैन कार्ड / वोटर आईडी / ड्राइविंग लाइसेंस और 4 से 6 नवीनतम पासपोर्ट साइज फोटोग्राफ।</li>
+        </ul>
+
+        <h2>मोबाइल या कंप्यूटर से {short_exam} कैसे चेक करें? (Step-by-Step प्रक्रिया)</h2>
+        <p>उम्मीदवारों की सुविधा के लिए हमने रिजल्ट चेक करने और मेरिट लिस्ट पीडीएफ डाउनलोड करने की पूरी प्रक्रिया को बहुत ही सरल स्टेप्स में नीचे लिखा है:</p>
         <ol>
-            <li>सबसे पहले <strong>{portal_name}</strong> (<a href="{portal_url}" target="_blank" rel="noopener">{portal_url}</a>) को खोलें या नीचे दिए गए <strong>Direct Result Link</strong> पर क्लिक करें।</li>
-            <li>Homepage पर <strong>Results / Latest Announcements</strong> सेक्शन पर जाएं।</li>
-            <li>वहाँ हाल ही में जारी किए गए <strong>“{raw_notice}”</strong> वाले आधिकारिक लिंक का चयन करें।</li>
-            <li>खुलने वाली Result PDF में <code>Ctrl + F</code> या सर्च आइकॉन से अपना <strong>Roll Number</strong> टाइप करें और PDF सेव कर लें।</li>
+            <li><strong>आधिकारिक पोर्टल खोलें:</strong> सबसे पहले <strong>{portal_name}</strong> की आधिकारिक वेबसाइट (<a href="{portal_url}" target="_blank" rel="noopener">{portal_url}</a>) पर जाएं या नीचे टेबल में दिए गए <strong>Direct Result Link</strong> पर क्लिक करें।</li>
+            <li><strong>Result / What's New सेक्शन चुनें:</strong> होमपेज पर दिख रहे नवीनतम सूचना पटल (Notice Board) में <strong>“{raw_notice}”</strong> वाले लिंक को खोजें और उस पर क्लिक करें।</li>
+            <li><strong>रोल नंबर या लॉगिन विवरण दर्ज करें:</strong> यदि परिणाम पीडीएफ में है तो फाइल डाउनलोड करके <code>Ctrl + F</code> दबाएं और अपना Roll Number लिखें; यदि लॉगिन लिंक एक्टिव हुआ है तो अपना Registration Number और Date of Birth डालकर सबमिट करें।</li>
+            <li><strong>भविष्य के लिए प्रिंट सुरक्षित रखें:</strong> स्क्रीन पर अपना परिणाम और अंक दिखने के बाद उसे PDF के रूप में सेव कर लें और एक प्रिंटआउट निकाल कर अपने पास रख लें।</li>
         </ol>
         """
-        what_to_check_heading = "Result PDF और Scorecard में छात्र कौन-सी बातें ध्यान से देखें?"
-        what_to_check_list = """
-        <ul>
-            <li><strong>Roll Number एवं Registration Number:</strong> अपने एडमिट कार्ड पर लिखे रोल नंबर के एक-एक अंक का मिलान करें।</li>
-            <li><strong>Candidate Category:</strong> PDF में आपकी श्रेणी (UR/OBC/SC/ST/EWS) का जो कोड लिखा है, उसे मिलाएं।</li>
-            <li><strong>Qualifying Status & Cut-Off Table:</strong> परिणाम नोटिस के नीचे दी गई श्रेणीवार कट-ऑफ तालिका से अपने अंकों की तुलना करें।</li>
-        </ul>
-        """
-        next_stage_heading = f"{short_exam} में पास होने के बाद आगे की प्रक्रिया (Document Verification)"
-        next_stage_body = f"""
-        <p>सफल घोषित किए गए सभी छात्रों को अगले चरण (Document Verification) के लिए 10वीं, 12वीं, स्नातक की मूल अंकतालिकाएं, वैध जाति/EWS प्रमाण पत्र, एडमिट कार्ड और मूल फोटो पहचान पत्र (PAN Card / Voter ID / Driving License) तैयार रखने चाहिए।</p>
-        """
-        link_label = f"Download {short_exam} Official PDF / Check Result"
+        link_label = f"Download {short_exam} Official PDF / Direct Login Link"
 
     elif category == "Admit Card":
-        lead_html = f"""
-        <p><strong>{org_name}</strong> ने <strong>{core_exam}</strong> परीक्षा में शामिल होने जा रहे उम्मीदवारों के लिए आधिकारिक प्रवेश पत्र (Admit Card / Hall Ticket) और परीक्षा तिथि से जुड़ी महत्वपूर्ण सूचना जारी कर दी है। आधिकारिक पोर्टल पर यह अपडेट <em>“{raw_notice}”</em> शीर्षक से उपलब्ध है।</p>
-        {student_tip_box}
+        body_sections = f"""
+        <p><strong>{org_name}</strong> ने <strong>{core_exam}</strong> परीक्षा की तैयारी कर रहे उम्मीदवारों के लिए आधिकारिक प्रवेश पत्र (Admit Card / Hall Ticket) और परीक्षा शहर की सूचना से जुड़ी नई लिंक जारी कर दी है। विभाग की वेबसाइट पर यह अपडेट <em>“{raw_notice}”</em> के नाम से एक्टिव किया गया है। जिन अभ्यर्थियों ने इस भर्ती के लिए सफलतापूर्वक ऑनलाइन आवेदन किया था, वे अब अपने लॉगिन विवरण की सहायता से अपना एडमिट कार्ड डाउनलोड कर सकते हैं।</p>
+        <p>हमने गूगल और आधिकारिक पोर्टल पर क्रॉस-चेक करके यह सुनिश्चित किया है कि यह लिंक/सूचना हाल ही में सक्रिय हुई है। परीक्षा से पहले हर छात्र को अपने परीक्षा केंद्र के पते, रिपोर्टिंग टाइम और शिफ्ट के नियमों की सटीक जानकारी होनी चाहिए, जिसे हमने नीचे पैराग्राफ और बुलेट पॉइंट्स में विस्तार से समझाया है।</p>
+        {student_verification_box}
+        {overview_6_line_table}
+
+        <h2>{short_exam} Download Link: कब एक्टिव हुआ और इसमें क्या-क्या जानकारी मिलेगी?</h2>
+        <p>जब भी किसी प्रतियोगी परीक्षा का एडमिट कार्ड या एग्जाम सिटी स्लिप जारी होती है, तो सबसे पहले यह समझना जरूरी होता है कि क्या यह केवल परीक्षा शहर की जानकारी (City Intimation) है या मुख्य प्रवेश पत्र (Final e-Admit Card)। <strong>{short_org}</strong> द्वारा जारी इस अपडेट के जरिए उम्मीदवार अपने परीक्षा कार्यक्रम की पूरी पुष्टि कर सकते हैं।</p>
+        <p>एडमिट कार्ड डाउनलोड करने के बाद आपको उसमें नीचे दिए गए मुख्य बिंदु स्पष्ट रूप से दिखाई देंगे:</p>
+        <ul>
+            <li><strong>परीक्षा की सटीक तिथि और पाली (Exam Date & Shift):</strong> आपकी परीक्षा किस तारीख को और किस शिफ्ट (सुबह, दोपहर या शाम) में आयोजित होगी।</li>
+            <li><strong>परीक्षा केंद्र का पूरा पता (Exam Centre Address & Code):</strong> जिस स्कूल, कॉलेज या ऑनलाइन लैब में आपकी परीक्षा होनी है, उसका नाम, शहर और पिन कोड।</li>
+            <li><strong>रिपोर्टिंग समय और गेट बंद होने का समय:</strong> केंद्र पर पहुंचने का समय (Reporting Time) और गेट बंद होने का अंतिम समय (Gate Closing Time)।</li>
+            <li><strong>उम्मीदवार की व्यक्तिगत पहचान:</strong> आपका नाम, रोल नंबर, एप्लीकेशन नंबर, कैटेगरी, स्कैन किया हुआ फोटो और हस्ताक्षर।</li>
+        </ul>
+
+        <h2>{core_exam} Exam Hall Guidelines और शिफ्ट के कड़े नियम</h2>
+        <p>परीक्षा के दिन किसी भी प्रकार की घबराहट या असुविधा से बचने के लिए उम्मीदवारों को परीक्षा बोर्ड के अनुशासन नियमों का पालन करना होता है। हर साल हजारों छात्र सिर्फ 5 मिनट की देरी या गलत आईडी प्रूफ ले जाने के कारण परीक्षा देने से वंचित रह जाते हैं।</p>
+        <p>परीक्षा केंद्र पर जाते समय नीचे दिए गए नियमों को हमेशा ध्यान में रखें:</p>
+        <ul>
+            <li><strong>समय से पहले उपस्थिति:</strong> एडमिट कार्ड पर लिखे रिपोर्टिंग समय से कम से कम 30 मिनट पहले केंद्र पर पहुंचें ताकि बायोमेट्रिक और फ्रिस्किंग (तलाशी) समय पर पूरी हो सके।</li>
+            <li><strong>मूल फोटो पहचान पत्र (Original Photo ID):</strong> प्रवेश पत्र के साथ एक मूल सरकारी फोटो आईडी (जैसे पैन कार्ड, वोटर आईडी कार्ड, ड्राइविंग लाइसेंस या पासपोर्ट) ले जाना अनिवार्य है, जिसमें नाम और जन्मतिथि एडमिट कार्ड से बिल्कुल मेल खाती हो।</li>
+            <li><strong>पासपोर्ट साइज फोटो और पेन:</strong> अपने साथ कम से कम 2 नवीनतम रंगीन पासपोर्ट साइज फोटो और पारदर्शी बॉल प्वाइंट पेन अवश्य रखें।</li>
+            <li><strong>प्रतिबंधित वस्तुएं (Banned Items):</strong> मोबाइल फोन, स्मार्ट वॉच, ब्लूटूथ, कैलकुलेटर, किसी भी प्रकार की पर्ची या मेटल की वस्तुएं परीक्षा कक्ष में ले जाना सख्त मना है।</li>
+        </ul>
+        {extra_pdf_heading_html}
+
+        <h2>मोबाइल से {short_exam} कैसे डाउनलोड करें? (Step-by-Step गाइड)</h2>
+        <p>अभ्यर्थी बिना किसी साइबर कैफे गए अपने मोबाइल फोन से भी मात्र 2 मिनट में अपना एडमिट कार्ड पीडीएफ डाउनलोड कर सकते हैं। इसके लिए नीचे दिए गए स्टेप्स को फॉलो करें:</p>
+        <ol>
+            <li><strong>डायरेक्ट लिंक पर क्लिक करें:</strong> इस लेख के अंत में दिए गए <strong>Download {short_exam} Link</strong> पर क्लिक करें या सीधे <a href="{portal_url}" target="_blank" rel="noopener">{portal_name}</a> पर जाएं।</li>
+            <li><strong>लॉगिन क्रेडेंशियल भरें:</strong> खुलने वाले नए पेज पर अपना <strong>Registration Number / Application ID</strong> और <strong>Date of Birth / Password</strong> सही-सही दर्ज करें।</li>
+            <li><strong>सिक्योरिटी कैप्चा सबमिट करें:</strong> स्क्रीन पर दिख रहे सुरक्षा कोड (Captcha) को भरकर 'Login' या 'Download Admit Card' बटन पर टैप करें।</li>
+            <li><strong>A4 साइज में प्रिंट निकालें:</strong> आपका प्रवेश पत्र स्क्रीन पर खुल जाएगा; इसे पीडीएफ में सेव करें और साफ-सुथरा रंगीन या ब्लैक एंड व्हाइट प्रिंटआउट निकाल लें।</li>
+        </ol>
         """
-        sec2_heading = f"{short_exam} Released: Exam City, Shift Timing और मुख्य जानकारी"
-        sec2_body = f"<p>{org_name} द्वारा जारी इस आधिकारिक अपडेट के माध्यम से उम्मीदवार अपनी सटीक परीक्षा तिथि (Exam Date), परीक्षा की पाली (Shift Timing), रिपोर्टिंग समय और परीक्षा शहर (Exam City & Centre Address) की जानकारी देख सकते हैं।</p>"
-        sec3_heading = f"{core_exam} Exam Shift Guidelines और Reporting Time के नियम"
-        sec3_body = "<ul><li>एडमिट कार्ड पर अंकित रिपोर्टिंग समय पर केंद्र पर पहुंचना अनिवार्य है।</li><li>Gate Closing Time के बाद किसी भी परिस्थिति में प्रवेश नहीं दिया जाता।</li></ul>"
-        how_to_heading = f"मोबाइल से {short_exam} कैसे डाउनलोड करें?"
-        how_to_steps = f"<ol><li><strong>{portal_name}</strong> खोलें या नीचे दिए गए Direct Link पर क्लिक करें।</li><li>अपना Registration Number और Date of Birth दर्ज करके एडमिट कार्ड डाउनलोड करें और A4 साइज पेपर पर प्रिंट निकाल लें।</li></ol>"
-        what_to_check_heading = "Admit Card डाउनलोड करने के बाद क्या चेक करें?"
-        what_to_check_list = "<ul><li>अपना नाम, रोल नंबर, जन्मतिथि, परीक्षा तिथि, शिफ्ट और परीक्षा केंद्र का पूरा पता ध्यान से मिलाएं।</li></ul>"
-        next_stage_heading = "Exam Hall में साथ ले जाने वाले जरूरी दस्तावेज़"
-        next_stage_body = "<p>प्रिंटेड एडमिट कार्ड के साथ मूल फोटो पहचान पत्र (पैन कार्ड, वोटर आईडी, ड्राइविंग लाइसेंस या पासपोर्ट) और 2 पासपोर्ट साइज फोटो अवश्य साथ ले जाएं।</p>"
-        link_label = f"Download {short_exam} Direct Link"
+        link_label = f"Download {short_exam} Direct Active Link"
 
     elif category == "Answer Key":
-        lead_html = f"""
-        <p><strong>{org_name}</strong> ने हाल ही में आयोजित की गई <strong>{core_exam}</strong> परीक्षा की आधिकारिक उत्तर कुंजी (Answer Key / Response Sheet) जारी कर दी है। आधिकारिक पोर्टल पर यह अपडेट <em>“{raw_notice}”</em> शीर्षक से उपलब्ध है।</p>
-        {student_tip_box}
+        body_sections = f"""
+        <p><strong>{org_name}</strong> ने हाल ही में संपन्न हुई <strong>{core_exam}</strong> परीक्षा की आधिकारिक उत्तर कुंजी (Answer Key) और रिस्पॉन्स शीट (Response Sheet) से जुड़ा नया अपडेट जारी कर दिया है। आधिकारिक वेबसाइट पर यह सूचना <em>“{raw_notice}”</em> शीर्षक के अंतर्गत लाइव की गई है। परीक्षा में बैठने वाले सभी छात्र अब अपने लॉगिन विवरण के माध्यम से अपने द्वारा चुने गए उत्तरों और बोर्ड के सही उत्तरों का मिलान कर सकते हैं।</p>
+        <p>रिजल्ट आने से पहले अपने संभावित नंबर (Raw Score) जानने और यदि किसी प्रश्न में आयोग से गलती हुई है तो उस पर आपत्ति (Objection) दर्ज कराने का यह सबसे महत्वपूर्ण अवसर होता है। हमने इस नई लिंक/पीडीएफ की पूरी जांच करके नीचे सभी नियम आसान पैराग्राफ और पॉइंट्स में दिए हैं।</p>
+        {student_verification_box}
+        {overview_6_line_table}
+
+        <h2>{short_exam} Released: Response Sheet और Objection Link की पूरी जानकारी</h2>
+        <p>बोर्ड द्वारा जारी इस उत्तर कुंजी का मुख्य उद्देश्य भर्ती प्रक्रिया में 100% पारदर्शिता बनाए रखना है। जब आप अपनी रिस्पॉन्स शीट डाउनलोड करते हैं, तो उसमें प्रत्येक प्रश्न की एक यूनिक आईडी (Question ID) और आपके द्वारा चुने गए विकल्प की स्थिति (Chosen Option) दर्ज होती है।</p>
+        <p>इस आधिकारिक आंसर की से जुड़े प्रमुख बिंदु नीचे दिए गए हैं:</p>
+        <ul>
+            <li><strong>प्रोविजनल बनाम फाइनल आंसर की:</strong> प्रारंभ में जारी की जाने वाली उत्तर कुंजी अनंतिम (Provisional) होती है जिस पर छात्रों से आपत्तियां मांगी जाती हैं।</li>
+            <li><strong>Question ID और Option ID का मिलान:</strong> ऑनलाइन परीक्षाओं में प्रश्नों का क्रम अलग-अलग होता है, इसलिए मिलान करते समय हमेशा Question ID और करेक्ट Option ID को ध्यान से देखें।</li>
+            <li><strong>आपत्ति दर्ज करने की समय-सीमा:</strong> बोर्ड द्वारा केवल कुछ ही दिनों के लिए Objection Window खोली जाती है; अंतिम तिथि निकलने के बाद किसी भी ईमेल या डाक से भेजी गई आपत्ति स्वीकार नहीं होती।</li>
+            <li><strong>फाइनल मेरिट पर असर:</strong> छात्रों द्वारा भेजी गई वैध आपत्तियों की विषय विशेषज्ञों (Subject Experts) द्वारा जांच की जाती है और उसके बाद ही संशोधित उत्तर कुंजी व रिजल्ट जारी होता है।</li>
+        </ul>
+
+        <h2>{core_exam} Answer Key से अपने सटीक नंबर (Score) कैसे निकालें?</h2>
+        <p>उत्तर कुंजी डाउनलोड करने के बाद कई छात्र नेगेटिव मार्किंग के कारण अपने कुल अंक जोड़ने में गलती कर बैठते हैं। अपने सही रॉ मार्क्स (Raw Score) निकालने के लिए आपको परीक्षा की मार्किंग स्कीम को ध्यान में रखना चाहिए:</p>
+        <ul>
+            <li><strong>सही उत्तरों की गिनती करें:</strong> सबसे पहले पूरी शीट में उन प्रश्नों को गिनें जिनका उत्तर आधिकारिक कुंजी से 100% मेल खाता है।</li>
+            <li><strong>गलत उत्तरों (Negative Marking) को अलग लिखें:</strong> जिन प्रश्नों का उत्तर आपने गलत दिया है, उनकी कुल संख्या नोट करें और परीक्षा के नियम (जैसे 1/4 या 1/3 नेगेटिव मार्किंग) के अनुसार कटौती करें।</li>
+            <li><strong>छोड़े गए प्रश्न (Unattempted Questions):</strong> जिन प्रश्नों को आपने खाली छोड़ा है, उनके लिए न तो कोई अंक मिलता है और न ही कोई नेगेटिव मार्किंग होती है।</li>
+            <li><strong>आसान सूत्र:</strong> <code>कुल प्राप्तांक = (सही प्रश्न × निर्धारित अंक) − (गलत प्रश्न × नेगेटिव अंक)</code>।</li>
+        </ul>
+        {extra_pdf_heading_html}
+
+        <h2>गलत प्रश्न या उत्तर पर ऑनलाइन आपत्ति (Objection) कैसे दर्ज करें? और कैसे डाउनलोड करें?</h2>
+        <p>यदि आपको पूरा विश्वास है कि आयोग द्वारा दिया गया कोई उत्तर गलत है, तो आप नीचे दिए गए स्टेप्स से अपनी आंसर की डाउनलोड करके ऑनलाइन आपत्ति दर्ज कर सकते हैं:</p>
+        <ol>
+            <li><strong>आधिकारिक लिंक खोलें:</strong> नीचे टेबल में दिए गए <strong>Direct Answer Key / Response Sheet Link</strong> पर क्लिक करें।</li>
+            <li><strong>लॉगिन करें:</strong> अपना Roll Number / Application Number और Password (या जन्मतिथि) दर्ज करके डैशबोर्ड में प्रवेश करें।</li>
+            <li><strong>Response Sheet PDF सेव करें:</strong> स्क्रीन पर दिखने वाली प्रश्न पत्र और उत्तर कुंजी की फाइल को प्रिंट या सेव कर लें।</li>
+            <li><strong>Objection दर्ज करें (यदि आवश्यक हो):</strong> 'Raise Objection' टैब पर क्लिक करें, संबंधित Question ID चुनें, मानक पुस्तक (NCERT या सरकारी रेफरेंस बुक) के पेज की पीडीएफ अपलोड करें और निर्धारित शुल्क जमा करके सबमिट कर दें।</li>
+        </ol>
         """
-        sec2_heading = f"{short_exam} Released: Response Sheet और Objection Window"
-        sec2_body = "<p>अभ्यर्थी अपने द्वारा टिक किए गए विकल्प और बोर्ड द्वारा सही माने गए आधिकारिक उत्तर दोनों का मिलान कर सकते हैं और किसी प्रश्न पर संदेह होने पर निर्धारित समय में आपत्ति (Objection) दर्ज कर सकते हैं।</p>"
-        sec3_heading = f"{core_exam} Score Calculation कैसे करें?"
-        sec3_body = "<p>कुल प्राप्तांक = (सही उत्तर × प्रति प्रश्न अंक) − (गलत उत्तर × नेगेटिव मार्किंग अंक)।</p>"
-        how_to_heading = f"मोबाइल से {short_exam} कैसे डाउनलोड करें?"
-        how_to_steps = f"<ol><li>नीचे दिए गए Direct Link पर क्लिक करें।</li><li>Roll Number और Password/DOB से लॉगिन करके अपनी Response Sheet PDF सेव कर लें।</li></ol>"
-        what_to_check_heading = "Answer Key में कौन-सी बातें देखें?"
-        what_to_check_list = "<ul><li>Question ID, Option ID और आधिकारिक सही विकल्प का ध्यानपूर्वक मिलान करें।</li></ul>"
-        next_stage_heading = "गलत प्रश्न या उत्तर पर आपत्ति (Objection) कैसे दर्ज करें?"
-        next_stage_body = f"<p>यदि किसी प्रश्न का उत्तर गलत है, तो {portal_name} पर लॉगिन करके मानक पुस्तक (NCERT/Standard Book) के प्रूफ के साथ ऑनलाइन आपत्ति दर्ज कराएं।</p>"
-        link_label = f"Download {short_exam} PDF / Response Sheet Link"
+        link_label = f"Download {short_exam} PDF / Response Sheet Active Link"
 
     else:
-        lead_html = f"""
-        <p><strong>{org_name}</strong> ने सरकारी नौकरी की तैयारी कर रहे युवाओं के लिए <strong>{core_exam}</strong> भर्ती प्रक्रिया का आधिकारिक विज्ञापन (Official Notification PDF) जारी कर दिया है। आधिकारिक भर्ती पोर्टल पर यह अधिसूचना <em>“{raw_notice}”</em> शीर्षक के अंतर्गत उपलब्ध कराई गई है।</p>
-        {student_tip_box}
-        """
-        sec2_heading = f"{short_exam} Notification Out: पदों का विवरण और मुख्य बातें"
-        sec2_body = f"<p>पीडीएफ विश्लेषण के अनुसार, इस भर्ती में <strong>कुल पद: {total_posts}</strong> के लिए प्रक्रिया शुरू की गई है। आरक्षित वर्गों (SC, ST, OBC-NCL, EWS, PwBD) को सरकारी नियमों के अनुसार छूट प्रदान की जाएगी।</p>"
-        sec3_heading = f"{core_exam} Eligibility Criteria: योग्यता, आयु सीमा, शुल्क और वेतनमान"
-        sec3_body = f"""
+        body_sections = f"""
+        <p><strong>{org_name}</strong> ने सरकारी नौकरी की तलाश कर रहे योग्य उम्मीदवारों के लिए <strong>{core_exam}</strong> भर्ती का आधिकारिक विज्ञापन (Official Notification) जारी कर दिया है। विभाग के आधिकारिक पोर्टल पर यह नई भर्ती सूचना <em>“{raw_notice}”</em> शीर्षक के अंतर्गत प्रकाशित की गई है। जो भी युवा केंद्र या राज्य सरकार के इस प्रतिष्ठित विभाग में अपनी सेवाएं देना चाहते हैं, उनके लिए यह एक अत्यंत सुनहरा अवसर है।</p>
+        <p>हमने इस नए नोटिफिकेशन पीडीएफ को डाउनलोड करके इसकी बारीकी से जांच की है ताकि आपको लंबी-चौड़ी फाइल पढ़ने में समय न गंवाना पड़े। इस लेख में आपको सबसे पहले 6-लाइन की ओवरव्यू टेबल मिलेगी और उसके बाद शैक्षणिक योग्यता, आयु सीमा, आवेदन शुल्क, वेतनमान और ऑनलाइन फॉर्म भरने की पूरी जानकारी साफ-सुथरे पैराग्राफ व बुलेट पॉइंट्स में पढ़ने को मिलेगी।</p>
+        {student_verification_box}
+        {overview_6_line_table}
+
+        <h2>{short_exam} Notification: भर्ती का मुख्य विवरण और पदों की जानकारी</h2>
+        <p>जब भी कोई नई सरकारी वैकेंसी आती है, तो फॉर्म भरने से पहले हर उम्मीदवार को यह समझना चाहिए कि यह भर्ती किस प्रकृति की है और इसमें किन-किन श्रेणियों के लिए अवसर उपलब्ध हैं। <strong>{short_org}</strong> द्वारा जारी इस आधिकारिक नोटिफिकेशन के अनुसार, विभाग में रिक्त पदों को भरने के लिए योग्य भारतीय नागरिकों से आवेदन आमंत्रित किए गए हैं।</p>
+        <p>इस भर्ती अभियान से जुड़ी सबसे प्रमुख विशेषताएं नीचे बुलेट पॉइंट्स में दी गई हैं:</p>
         <ul>
-            <li><strong>शैक्षणिक योग्यता:</strong> {qualification}</li>
-            <li><strong>आयु सीमा:</strong> {age_limit}</li>
-            <li><strong>आवेदन शुल्क:</strong> {app_fee}</li>
-            <li><strong>वेतनमान:</strong> {salary_info}</li>
+            <li><strong>कुल विज्ञापित पद (Total Vacancies):</strong> आधिकारिक सूचना के विश्लेषण के अनुसार इस भर्ती के तहत <strong>{total_posts}</strong> के लिए चयन प्रक्रिया आयोजित की जाएगी।</li>
+            <li><strong>विज्ञापन एवं संदर्भ संख्या:</strong> यह भर्ती आधिकारिक सूचना संख्या <strong>{advt_no}</strong> के अंतर्गत जारी की गई है।</li>
+            <li><strong>आवेदन का माध्यम:</strong> उम्मीदवारों को केवल आधिकारिक वेबसाइट (<a href="{portal_url}" target="_blank" rel="noopener">{portal_name}</a>) के माध्यम से ही अपना फॉर्म जमा करना होगा; किसी अन्य माध्यम से भेजे गए फॉर्म स्वीकार नहीं होंगे।</li>
+            <li><strong>आरक्षण का लाभ:</strong> अनुसूचित जाति (SC), अनुसूचित जनजाति (ST), अन्य पिछड़ा वर्ग (OBC-NCL), आर्थिक रूप से कमजोर वर्ग (EWS), पूर्व सैनिक (Ex-Servicemen) और दिव्यांग (PwBD) अभ्यर्थियों को सरकारी नियमों के अनुसार पदों व आयु में छूट दी जाएगी।</li>
         </ul>
+
+        <h2>{core_exam} Eligibility Criteria: शैक्षणिक योग्यता और आयु सीमा (पॉइंट्स में)</h2>
+        <p>ऑनलाइन आवेदन शुरू करने से पहले सबसे जरूरी कदम अपनी पात्रता (Eligibility) की जांच करना है। यदि कोई उम्मीदवार निर्धारित कट-ऑफ तिथि (Crucial Date) तक आवश्यक डिग्री या आयु सीमा पूरी नहीं करता है, तो बाद में डॉक्यूमेंट वेरिफिकेशन के समय उसका आवेदन निरस्त किया जा सकता है।</p>
+        <p>नोटिफिकेशन पीडीएफ के अनुसार पात्रता के मुख्य मापदंड इस प्रकार हैं:</p>
+        <ul>
+            <li><strong>शैक्षणिक योग्यता (Educational Qualification):</strong> उम्मीदवार के पास किसी मान्यता प्राप्त बोर्ड, विश्वविद्यालय या संस्थान से <strong>{qualification}</strong> होना अनिवार्य है। (पदानुसार विस्तृत योग्यता के लिए नीचे दी गई आधिकारिक पीडीएफ अवश्य देखें)।</li>
+            <li><strong>आयु सीमा (Age Limit):</strong> इस भर्ती के लिए उम्मीदवार की आयु <strong>{age_limit}</strong> निर्धारित की गई है।</li>
+            <li><strong>अधिकतम आयु में छूट (Age Relaxation):</strong> आरक्षित वर्ग के उम्मीदवारों को सरकारी नियमानुसार ऊपरी आयु सीमा में विशेष छूट मिलती है—जैसे OBC (NCL) को 3 वर्ष, SC/ST को 5 वर्ष और PwBD उम्मीदवारों को श्रेणी के अनुसार 10 से 15 वर्ष तक की छूट।</li>
+            <li><strong>नागरिकता एवं अन्य शर्तें:</strong> अभ्यर्थी भारत का नागरिक होना चाहिए तथा संबंधित पद के लिए निर्धारित शारीरिक व चिकित्सीय मानकों को पूरा करता हो।</li>
+        </ul>
+
+        <h2>{core_exam} Application Fee, वेतनमान (Salary) और चयन प्रक्रिया</h2>
+        <p>एक प्रतियोगी छात्र के लिए फॉर्म की फीस, सिलेक्शन का तरीका और चयन के बाद मिलने वाली सैलरी जानना बेहद महत्वपूर्ण होता है। विभाग ने अपने आधिकारिक विज्ञापन में इन तीनों बिंदुओं को स्पष्ट किया है:</p>
+        <ul>
+            <li><strong>आवेदन शुल्क (Application Fee):</strong> उम्मीदवारों के लिए आवेदन शुल्क <strong>{app_fee}</strong> रखा गया है। शुल्क का भुगतान डेबिट कार्ड, क्रेडिट कार्ड, नेट बैंकिंग या UPI के माध्यम से ऑनलाइन किया जा सकता है।</li>
+            <li><strong>वेतनमान और भत्ते (Pay Scale & Perks):</strong> चयनित होने वाले उम्मीदवारों को <strong>{salary_info}</strong> के तहत मूल वेतन के साथ महंगाई भत्ता (DA), मकान किराया भत्ता (HRA), यात्रा भत्ता और मेडिकल सुविधाएं प्रदान की जाएंगी।</li>
+            <li><strong>चयन प्रक्रिया के चरण (Selection Process):</strong> इस भर्ती में उम्मीदवारों का अंतिम चयन लिखित / कंप्यूटर आधारित परीक्षा (CBT/Written Exam), कौशल या शारीरिक परीक्षण (यदि पद के लिए लागू हो), डॉक्यूमेंट वेरिफिकेशन (DV) और मेडिकल जांच के आधार पर किया जाएगा।</li>
+        </ul>
+        {extra_pdf_heading_html}
+
+        <h2>{short_exam} का Online Form कैसे भरें? (Step-by-Step आवेदन प्रक्रिया)</h2>
+        <p>जो उम्मीदवार ऊपर दी गई सभी पात्रता शर्तों को पूरा करते हैं, वे अंतिम तिथि से पहले नीचे बताए गए आसान स्टेप्स को फॉलो करके अपना ऑनलाइन फॉर्म बिना किसी गलती के भर सकते हैं:</p>
+        <ol>
+            <li><strong>आधिकारिक पीडीएफ ध्यान से पढ़ें:</strong> सबसे पहले नीचे दिए गए <strong>Important Links</strong> सेक्शन से आधिकारिक नोटिफिकेशन डाउनलोड करें और अपने पद की योग्यता व शर्तें पढ़ लें।</li>
+            <li><strong>पोर्टल पर नया रजिस्ट्रेशन (OTR / Registration) करें:</strong> <a href="{portal_url}" target="_blank" rel="noopener">{portal_name}</a> पर जाएं और अपने चालू मोबाइल नंबर व ईमेल आईडी की मदद से बेसिक रजिस्ट्रेशन पूरा करें।</li>
+            <li><strong>विस्तृत आवेदन फॉर्म भरें:</strong> लॉगिन करने के बाद अपनी व्यक्तिगत जानकारी, माता-पिता का नाम, स्थायी पता और शैक्षणिक योग्यता (10वीं/12वीं/स्नातक के रोल नंबर व प्रतिशत) बिल्कुल मार्कशीट के अनुसार भरें।</li>
+            <li><strong>फोटो, सिग्नेचर और दस्तावेज़ अपलोड करें:</strong> निर्धारित साइज (KB) और फॉर्मेट (JPG/PDF) में अपनी नवीनतम पासपोर्ट साइज फोटो, स्पष्ट हस्ताक्षर और मांगे गए प्रमाण पत्र अपलोड करें।</li>
+            <li><strong>फीस जमा करें और फाइनल प्रिंट निकालें:</strong> फॉर्म का Preview ध्यान से जांचने के बाद ऑनलाइन आवेदन शुल्क जमा करें और Final Submit होने पर एप्लीकेशन फॉर्म की पीडीएफ सेव करके प्रिंटआउट रख लें।</li>
+        </ol>
         """
-        how_to_heading = f"{short_exam} का Online Form कैसे भरें?"
-        how_to_steps = f"<ol><li>नीचे दिए गए लिंक से Official Notification PDF डाउनलोड करके पढ़ें।</li><li>{portal_name} पर जाकर OTR/New Registration करें, दस्तावेज़ अपलोड करें और फीस जमा करके फाइनल सबमिट करें।</li></ol>"
-        what_to_check_heading = "Notification PDF में फॉर्म भरने से पहले क्या देखें?"
-        what_to_check_list = "<ul><li>Category-wise Vacancy, Crucial Cut-off Date, Exam Pattern और Syllabus ध्यान से पढ़ें।</li></ul>"
-        next_stage_heading = f"{short_exam} ऑनलाइन आवेदन के लिए जरूरी दस्तावेज़"
-        next_stage_body = "<p>10वीं/12वीं/स्नातक की मार्कशीट, वैध फोटो आईडी (पैन कार्ड, वोटर आईडी या ड्राइविंग लाइसेंस), जाति/EWS सर्टिफिकेट, नवीनतम फोटो और सिग्नेचर स्कैन करके तैयार रखें।</p>"
         link_label = f"Download {short_exam} Notification PDF / Apply Online"
 
-    full_html = f"""
-    {lead_html}
-    <h2>{short_exam}: संक्षिप्त विवरण (Overview Table)</h2>
-    <table border="1" cellpadding="10" cellspacing="0" style="width:100%; border-collapse:collapse; margin:15px 0 25px 0;">
-        <tbody>
-            <tr><td><strong>भर्ती बोर्ड / विभाग</strong></td><td>{org_name}</td></tr>
-            <tr><td><strong>परीक्षा / भर्ती का नाम</strong></td><td>{core_exam}</td></tr>
-            <tr><td><strong>आधिकारिक नोटिस शीर्षक</strong></td><td>{raw_notice}</td></tr>
-            <tr><td><strong>विज्ञापन संख्या</strong></td><td>{advt_no}</td></tr>
-            <tr><td><strong>अपडेट कैटेगरी</strong></td><td>Official {category}</td></tr>
-            <tr><td><strong>कुल पद</strong></td><td>{total_posts}</td></tr>
-            <tr><td><strong>शैक्षणिक योग्यता</strong></td><td>{qualification}</td></tr>
-            <tr><td><strong>आयु सीमा</strong></td><td>{age_limit}</td></tr>
-            <tr><td><strong>आवेदन शुल्क</strong></td><td>{app_fee}</td></tr>
-            <tr><td><strong>वेतनमान</strong></td><td>{salary_info}</td></tr>
-            <tr><td><strong>महत्वपूर्ण तिथि</strong></td><td>{exam_date}</td></tr>
-            <tr><td><strong>अंतिम तिथि</strong></td><td>{last_date}</td></tr>
-            <tr><td><strong>आधिकारिक वेबसाइट</strong></td><td><a href="{portal_url}" target="_blank" rel="noopener">{portal_name}</a></td></tr>
-        </tbody>
-    </table>
-    <h2>{sec2_heading}</h2>{sec2_body}
-    <h2>{sec3_heading}</h2>{sec3_body}
-    <h2>{how_to_heading}</h2>{how_to_steps}
-    <h2>{what_to_check_heading}</h2>{what_to_check_list}
-    <h2>{next_stage_heading}</h2>{next_stage_body}
+    faq_and_links_html = f"""
     <h2>{short_exam}: Important Official Links</h2>
+    <p>उम्मीदवारों की सुविधा और समय की बचत के लिए हमने आधिकारिक पीडीएफ/एक्टिव लिंक और मुख्य वेबसाइट के डायरेक्ट लिंक नीचे टेबल में उपलब्ध करा दिए हैं:</p>
     <table border="1" cellpadding="10" cellspacing="0" style="width:100%; border-collapse:collapse; margin:15px 0 25px 0;">
         <tbody>
-            <tr><td><strong>{link_label}</strong></td><td><a href="{target_url}" target="_blank" rel="noopener"><strong>Click Here for Official {category} ({doc_format})</strong></a></td></tr>
-            <tr><td><strong>Official Website ({short_org})</strong></td><td><a href="{portal_url}" target="_blank" rel="noopener"><strong>Visit {portal_name}</strong></a></td></tr>
+            <tr style="background-color:#eef6ff;">
+                <td><strong>{link_label}</strong></td>
+                <td><a href="{target_url}" target="_blank" rel="noopener"><strong>Click Here for Official {category} ({doc_format})</strong></a></td>
+            </tr>
+            <tr>
+                <td><strong>Official Website ({short_org})</strong></td>
+                <td><a href="{portal_url}" target="_blank" rel="noopener"><strong>Visit {portal_name} Official Page</strong></a></td>
+            </tr>
         </tbody>
     </table>
+
+    <h2>अक्सर पूछे जाने वाले प्रश्न (FAQs) – {short_exam}</h2>
+    <p>इस अपडेट को लेकर छात्रों द्वारा सबसे ज्यादा पूछे जाने वाले सवालों के संक्षिप्त उत्तर नीचे दिए गए हैं:</p>
+    <ul>
+        <li><strong>प्रश्न 1: {short_exam} का यह आधिकारिक अपडेट कब जारी किया गया है?</strong><br>
+        उत्तर: विभाग द्वारा यह आधिकारिक {doc_format} अपडेट {release_date} को आधिकारिक पोर्टल पर जारी/सक्रिय किया गया है।</li>
+        <li><strong>प्रश्न 2: यह सूचना किस भर्ती बोर्ड द्वारा जारी की गई है?</strong><br>
+        उत्तर: यह सूचना आधिकारिक तौर पर <strong>{org_name}</strong> द्वारा जारी की गई है।</li>
+        <li><strong>प्रश्न 3: {core_exam} के लिए मुख्य पात्रता या पद विवरण क्या है?</strong><br>
+        उत्तर: उपलब्ध विवरण के अनुसार कुल पद: {total_posts} हैं और आवश्यक योग्यता: {qualification} निर्धारित है।</li>
+        <li><strong>प्रश्न 4: मैं आधिकारिक पीडीएफ या डायरेक्ट लिंक कहाँ से एक्सेस कर सकता हूँ?</strong><br>
+        उत्तर: आप इस लेख के ऊपर दी गई <strong>Important Official Links</strong> टेबल में डायरेक्ट क्लिक करके या <a href="{portal_url}" target="_blank" rel="noopener">{portal_name}</a> पर जाकर इसे देख सकते हैं।</li>
+        <li><strong>प्रश्न 5: यदि वेबसाइट स्लो चल रही हो तो छात्रों को क्या करना चाहिए?</strong><br>
+        उत्तर: नया अपडेट आने पर सर्वर पर लोड बढ़ जाता है; ऐसे में कुछ देर प्रतीक्षा करें या सुबह/देर रात के समय पुनः प्रयास करें और अपना रजिस्ट्रेशन नंबर पहले से तैयार रखें।</li>
+    </ul>
     """
+
+    full_html = f"{body_sections}\n{faq_and_links_html}"
     return research_data["seo_title"], full_html.strip()
 
 # =====================================================================
-# 7. WORDPRESS DRAFT PUBLISHER
+# 8. WORDPRESS DRAFT PUBLISHER
 # =====================================================================
 def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
     preview_path = os.path.join(DATA_FOLDER, "latest_govtvibhag_style_draft.html")
@@ -780,13 +1042,9 @@ def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
     return 0
 
 # =====================================================================
-# 8. SMART SCANNER WITH JS-PORTAL RSS FALLBACK
+# 9. SMART SCANNER WITH JS-PORTAL RSS FALLBACK
 # =====================================================================
 def fetch_fallback_updates_for_js_portal(portal_info):
-    """
-    Jin portals (jaise SSC, AIIMS, RRB) par JavaScript ki wajah se direct HTML links nahi aate,
-    unke liye fresh 24-hour updates discover karta hai.
-    """
     discovered = []
     short_org = portal_info["short_org"]
     portal_url = portal_info["url"]
@@ -837,7 +1095,7 @@ def run_hourly_scanner():
         except Exception:
             print(f"   [{idx:02d}/{total_portals}] [Direct Connect Slow] Using Smart Backup for: {portal_name}")
 
-        # STEP A: Initial Sync Lock
+        # STEP A: Initial Sync Lock (First time run locks old notices so only NEW alerts are written)
         if not portal_already_synced:
             for link_text, full_target_url in candidate_links:
                 n_key = normalize_notice_key(portal, link_text)
@@ -850,39 +1108,52 @@ def run_hourly_scanner():
         if len(candidate_links) < 15:
             candidate_links.extend(fetch_fallback_updates_for_js_portal(portal_info))
 
-        # STEP B: Check for New Genuine Notices
+        # STEP B: Process New Alerts (PDFs as well as Newly Activated Links)
         processed_count = 0
         for link_text, full_target_url in candidate_links:
             if not is_genuine_notification(link_text, full_target_url):
                 continue
 
             n_key = normalize_notice_key(portal, link_text)
-            if is_already_processed(full_target_url if full_target_url != portal else f"{portal}#{n_key}", notice_key=n_key):
+            unique_target = full_target_url if full_target_url != portal else f"{portal}#{n_key}"
+
+            if is_already_processed(unique_target, notice_key=n_key):
                 continue
 
-            source_text, doc_format, last_mod, pdf_date = extract_source_and_metadata(full_target_url)
+            # 1. Download PDF or Inspect Active Link + Extract Headings
+            source_text, doc_format, last_mod, pdf_date, pdf_headings = extract_source_and_metadata(full_target_url)
             content_hash = hashlib.md5((link_text + source_text[:500]).encode("utf-8", errors="ignore")).hexdigest()
 
             combined_info = (link_text + " " + full_target_url).lower()
             category = determine_category(combined_info)
-            research_data = build_clean_human_title(portal_info, link_text, source_text, category)
-            proposed_seo_title = research_data["seo_title"]
 
-            unique_target = full_target_url if full_target_url != portal else f"{portal}#{n_key}"
+            # 2. Cross-Check on Google (Especially helpful when an Admit Card/Result/Answer Key is an Active Link without PDF)
+            google_cross_data = cross_check_active_link_on_google(portal_info["short_org"], link_text, category)
 
-            if is_already_processed(unique_target, notice_key=n_key, seo_title=proposed_seo_title, content_hash=content_hash):
-                mark_as_processed(portal, unique_target, n_key, link_text[:100], "DUPLICATE_IGNORED", "IGNORED_DUP", 0, content_hash)
-                continue
-
-            is_fresh, reason = verify_is_truly_fresh(link_text, source_text, last_mod, pdf_date)
+            # 3. Deep Freshness Audit (Metadata + Gemini Bariki se Janch)
+            is_fresh, reason, ai_purpose = verify_is_truly_fresh_with_gemini_audit(
+                portal_info, link_text, source_text, doc_format, last_mod, pdf_date, google_cross_data
+            )
             if not is_fresh:
                 print(f"   [{idx:02d}/{total_portals}] [Rejected Old Notice] {portal_name}: {link_text[:45]}... -> {reason}")
                 mark_as_processed(portal, unique_target, n_key, link_text[:100], f"OLD_REJECTED ({reason})", "IGNORED_OLD", 0, content_hash)
                 continue
 
-            print(f"   [{idx:02d}/{total_portals}] [FRESH {category.upper()} FOUND!] {portal_name}: {link_text[:60]}...")
-            print(f"       [PROFESSIONAL TITLE] -> {proposed_seo_title}")
+            # 4. Build SEO Title & Heading Blueprint
+            research_data = build_article_blueprint(
+                portal_info, link_text, source_text, category, pdf_headings, google_cross_data, ai_purpose
+            )
+            proposed_seo_title = research_data["seo_title"]
 
+            if is_already_processed(unique_target, notice_key=n_key, seo_title=proposed_seo_title, content_hash=content_hash):
+                mark_as_processed(portal, unique_target, n_key, link_text[:100], "DUPLICATE_IGNORED", "IGNORED_DUP", 0, content_hash)
+                continue
+
+            print(f"   [{idx:02d}/{total_portals}] [FRESH {category.upper()} VERIFIED!] {portal_name}: {link_text[:60]}...")
+            print(f"       [AUDIT] -> {reason}")
+            print(f"       [SEO TITLE] -> {proposed_seo_title}")
+
+            # 5. Write 1000+ Words Article (6-Line Overview Table + PDF/Smart Headings + Paragraphs + Bullet Points)
             seo_title, article_html = generate_professional_1000_words_article(
                 portal_info, research_data, full_target_url, category, source_text, doc_format
             )
@@ -908,7 +1179,7 @@ def run_hourly_scanner():
 if __name__ == "__main__":
     disable_cmd_quickedit()
     print("=========================================================================")
-    print("   GOVTVIBHAG.COM PROFESSIONAL EDITORIAL BOT v8.0 (TURBO EDITION)        ")
+    print("   GOVTVIBHAG.COM PROFESSIONAL EDITORIAL BOT v9.0 (HUMAN WRITER EDITION) ")
     print("=========================================================================")
     init_db()
     bot_start_dt = ensure_bot_start_time()
