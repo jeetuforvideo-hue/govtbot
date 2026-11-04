@@ -180,17 +180,12 @@ def init_db():
     conn.close()
 
 def ensure_fresh_v10_baseline_and_start_time():
-    """
-    Yeh function ensure karta hai ki jab aap yeh naya v10 code dalenge,
-    tab ka exact Timestamp save ho aur purane saare notices ek baar phir se 100% Lock ho jayein!
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT setting_value FROM bot_settings WHERE setting_key = ?", (BASELINE_VERSION_KEY,))
     v_row = cursor.fetchone()
 
     if not v_row:
-        # Naya code dala gaya hai: abhi ka exact time set karo aur sabhi portals ko re-lock mode me dalo
         now_iso = datetime.datetime.now().isoformat()
         cursor.execute("DELETE FROM synced_portals")
         cursor.execute("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('bot_start_iso', ?)", (now_iso,))
@@ -267,6 +262,22 @@ def mark_as_processed(portal_url, target_url, notice_key, raw_title, seo_title, 
         pass
     conn.close()
 
+def update_processed_post_record(post_db_id, new_seo_title, new_category, new_hash):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        cursor.execute(
+            """UPDATE processed_posts 
+               SET seo_title = ?, category = ?, content_hash = ?, updated_at = ?
+               WHERE id = ?""",
+            (new_seo_title, new_category, new_hash, now_str, post_db_id)
+        )
+        conn.commit()
+    except sqlite3.Error:
+        pass
+    conn.close()
+
 # =====================================================================
 # 4. SMART NOTIFICATION FILTER & CONTEXT EXTRACTOR
 # =====================================================================
@@ -297,7 +308,6 @@ def is_genuine_notification(link_text, full_url):
     if lower_url.startswith("javascript:") or lower_url.startswith("mailto:") or full_url.endswith("#"):
         return False
 
-    # Reject any older year in title or URL
     if re.search(r'\b(2015|2016|2017|2018|2019|2020|2021|2022|2023|2024|2025)\b', lower_text + " " + lower_url) and "2026" not in (lower_text + " " + lower_url):
         return False
 
@@ -407,11 +417,7 @@ def call_gemini_json_or_text(prompt_text, expect_json=False):
     return None
 
 def parse_any_date_from_text(text_sample):
-    """
-    Text ya title me likhi gayi kisi bhi date (e.g. 25/10/2026, 25-10-2026, 25 October 2026) ko nikalta hai.
-    """
     detected_dates = []
-    # Pattern 1: DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
     for m in re.finditer(r'\b(\d{1,2})[./-](\d{1,2})[./-](202\d)\b', text_sample):
         d, mn, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         try:
@@ -419,7 +425,6 @@ def parse_any_date_from_text(text_sample):
         except Exception:
             pass
 
-    # Pattern 2: DD Month YYYY
     months_map = {
         "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
         "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
@@ -434,17 +439,14 @@ def parse_any_date_from_text(text_sample):
             pass
     return detected_dates
 
-def cross_check_active_link_on_google(short_org, raw_notice_title, category, bot_start_dt):
-    """
-    Google News RSS par cross-check karta hai aur dekhta hai ki kya is par abhi-abhi (bot_start_dt ke baad) khabar aayi hai.
-    """
+def cross_check_active_link_on_google(short_org, raw_notice_title, category, bot_start_dt, time_window="1d"):
     snippets = []
     trending_titles = []
     found_date = ""
     has_recent_google_hit = False
 
     try:
-        search_q = f'"{short_org}" {raw_notice_title[:50]} {category} when:1d'
+        search_q = f'"{short_org}" {raw_notice_title[:50]} {category} when:{time_window}'
         rss_url = f"https://news.google.com/rss/search?q={quote_plus(search_q)}&hl=en-IN&gl=IN&ceid=IN:en"
         res = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if res.status_code == 200:
@@ -460,8 +462,7 @@ def cross_check_active_link_on_google(short_org, raw_notice_title, category, bot
                     if pub_str:
                         try:
                             pub_dt = parsedate_to_datetime(pub_str).replace(tzinfo=None)
-                            # Agar Google News article bot start hone ke 24 ghante ke andar ka hai
-                            if (pub_dt.date() >= bot_start_dt.date()):
+                            if pub_dt.date() >= bot_start_dt.date():
                                 has_recent_google_hit = True
                                 found_date = pub_dt.strftime("%d %B %Y")
                         except Exception:
@@ -477,21 +478,13 @@ def cross_check_active_link_on_google(short_org, raw_notice_title, category, bot
     }
 
 def verify_is_truly_published_after_bot_start(portal_info, raw_title, source_text, doc_format, last_modified_header, pdf_internal_date, google_cross_data, bot_start_dt):
-    """
-    STRICT FILTER:
-    Yeh function ensure karta hai ki:
-    1. Code jab dala gaya hai (bot_start_dt), us तारीख se pehle ka koi bhi PDF ya Link bilkul pass na ho!
-    2. Server header, PDF internal date, PDF ke shuruat me likhi Release Date ("Dated: ..."), Google Cross-Check, aur Gemini Audit—sabhi se check ho.
-    """
     today_date = datetime.datetime.now().date()
     bot_start_date = bot_start_dt.date()
 
-    # RULE 1: Check PDF Internal Creation/Modification Date
     if pdf_internal_date:
         if pdf_internal_date < bot_start_date:
             return False, f"Old PDF Created Before Code Start ({pdf_internal_date} < {bot_start_date})", ""
 
-    # RULE 2: Check Server Last-Modified Header
     if last_modified_header:
         try:
             mod_dt = parsedate_to_datetime(last_modified_header).replace(tzinfo=None)
@@ -500,7 +493,6 @@ def verify_is_truly_published_after_bot_start(portal_info, raw_title, source_tex
         except Exception:
             pass
 
-    # RULE 3: Check Explicit "Dated:" or Notice Release Date in Title & Top 600 chars of PDF
     header_snippet = f"{raw_title} {source_text[:600]}"
     dated_match = re.search(r'(?:dated|date|दिनांक|dt\.?)\s*[:=-]?\s*(\d{1,2}[./-]\d{1,2}[./-]202\d|\d{1,2}\s+[A-Za-z]+\s+202\d)', header_snippet, re.I)
     if dated_match:
@@ -510,12 +502,10 @@ def verify_is_truly_published_after_bot_start(portal_info, raw_title, source_tex
             if notice_issue_date < bot_start_date:
                 return False, f"Notice Issue Date ({notice_issue_date}) is Older Than Code Start ({bot_start_date})", ""
 
-    # RULE 4: Check if all dates mentioned in the title are in the past (before bot_start_date)
     title_dates = parse_any_date_from_text(raw_title)
     if title_dates and max(title_dates) < bot_start_date:
         return False, f"Title Date ({max(title_dates)}) is Older Than Code Start ({bot_start_date})", ""
 
-    # RULE 5: Gemini Deep Audit (Strict Check against bot_start_date)
     if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key":
         audit_prompt = f"""
         आप एक बहुत ही सख्त सरकारी नौकरी (Sarkari Naukri) वेरिफायर हैं।
@@ -550,9 +540,6 @@ def verify_is_truly_published_after_bot_start(portal_info, raw_title, source_tex
                 return False, f"Gemini Strict Audit Rejected: {ai_verdict.get('rejection_reason', 'Published before bot start')}", ""
             return True, f"Gemini Verified Fresh ({ai_verdict.get('issue_date_detected', 'Today')})", ai_verdict.get("exact_purpose", "")
 
-    # RULE 6: Agar Gemini API Key nahi lagi hai, tab bhi blind 'True' mat karo!
-    # Tab sirf tabhi pass karo jab ya toh PDF date >= bot_start_date ho, ya Server Last-Modified >= bot_start_date ho,
-    # ya Notice me aaj ki tarikh likhi ho, ya Google News par aaj/kal me khabar aayi ho!
     has_today_date_in_text = (today_date in parse_any_date_from_text(header_snippet)) or (bot_start_date in parse_any_date_from_text(header_snippet))
     has_fresh_pdf_or_server_date = (pdf_internal_date and pdf_internal_date >= bot_start_date)
 
@@ -747,7 +734,7 @@ def build_article_blueprint(portal_info, raw_notice_title, pdf_text, category, p
 # =====================================================================
 # 7. HUMAN-STYLE 1000+ WORDS ARTICLE ENGINE
 # =====================================================================
-def generate_professional_1000_words_article(portal_info, research_data, target_url, category, source_text, doc_format):
+def generate_professional_1000_words_article(portal_info, research_data, target_url, category, source_text, doc_format, weekly_update_note=""):
     org_name = portal_info["org"]
     short_org = portal_info["short_org"]
     portal_name = portal_info["portal_name"]
@@ -769,15 +756,24 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
     trending_ref = " | ".join(research_data["trending_titles"][:4]) if research_data["trending_titles"] else research_data["seo_title"]
     google_context = " | ".join(research_data.get("google_snippets", [])[:3])
 
+    weekly_banner_html = ""
+    if weekly_update_note:
+        weekly_banner_html = f"""
+        <div style="background-color:#fff8e5; border-left:5px solid #ff9800; padding:15px; margin:15px 0; border-radius:4px;">
+            <strong>🔄 साप्ताहिक बुधवार एडिटोरियल अपडेट ({release_date}):</strong> {weekly_update_note}
+        </div>
+        """
+
     if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key":
         writer_prompt = f"""
         आप एक बहुत ही अनुभवी, प्रोफेशनल हिंदी कंटेंट राइटर (Sarkari Naukri & Competitive Exam Expert) हैं।
-        आपको "{research_data['seo_title']}" विषय पर **1,100 से 1,300 शब्दों (1000+ Words)** का एक बेहद आकर्षक, साफ-सुथरा और यूजर-फ्रेंडली आर्टिकल लिखना है।
+        आपको "{research_data['seo_title']}" विषय पर **1,100 से 1,300 शब्दों (1000+ Words)** का एक बेहद आकर्षक, साफ-सुथरा और यूजर-फ्रेंडली आर्टिकल लिखना/अपडेट करना है।
 
         ### मेरे लिखने का खास तरीका (आपको बिल्कुल यही पैटर्न फॉलो करना है):
         1. **सबसे पहले परिचय और 6-7 लाइन का संक्षिप्त Overview Table:**
-           - शुरू में 2 पैराग्राफ में बताएं कि यह पीडीएफ या नया एक्टिव लिंक कब जारी हुआ है ({release_date}), किस विभाग ({org_name}) का है और किस परीक्षा ({core_exam}) के लिए है।
-           - तुरंत बाद **6 से 7 पंक्तियों (Rows) का एक साफ-सुथरा Overview Table** बनाएं जिसमें भर्ती बोर्ड, परीक्षा का नाम, अपडेट कैटेगरी ({category}), कुल पद/स्थितियां, जारी होने की तिथि ({release_date}) और आधिकारिक वेबसाइट एक नज़र में समझ आ जाएं।
+           - शुरू में 2 पैराग्राफ में बताएं कि यह पीडीएफ या नया एक्टिव लिंक कब जारी/अपडेट हुआ है ({release_date}), किस विभाग ({org_name}) का है और किस परीक्षा ({core_exam}) के लिए है।
+           - यदि यह साप्ताहिक बुधवार अपडेट है ({weekly_update_note}), तो गूगल क्रॉस-चेक से मिली ताज़ा स्थिति को शुरू में ही स्पष्ट करें।
+           - तुरंत बाद **6 से 7 पंक्तियों (Rows) का एक साफ-सुथरा Overview Table** बनाएं जिसमें भर्ती बोर्ड, परीक्षा का नाम, अपडेट कैटेगरी ({category}), कुल पद/स्थितियां, जारी/अपडेट होने की तिथि ({release_date}) और आधिकारिक वेबसाइट एक नज़र में समझ आ जाएं।
         2. **हेडिंग्स का चुनाव (PDF Headings + Smart Category Headings):**
            - पीडीएफ/पेज से निकली असली हेडिंग्स: {pdf_headings_str}
            - इस कैटेगरी के लिए जरूरी हेडिंग्स:
@@ -788,7 +784,7 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
            - उसके तुरंत बाद मुख्य बातों को **बुलेट पॉइंट्स (`<ul><li><strong>...</strong>: ...</li></ul>`)** में लिखें ताकि आर्टिकल देखने में सुंदर लगे और छात्र को पढ़ने में बिल्कुल बोरियत न हो।
         4. **कैटेगरी का विशेष ध्यान रखें ({category}):**
            - यदि यह **Govt Job** है: तो पदों का विवरण, योग्यता, आयु सीमा, फीस, सैलरी और ऑनलाइन फॉर्म भरने के स्टेप्स विस्तार से लिखें।
-           - यदि यह **Admit Card / Result / Answer Key** है (चाहे पीडीएफ आया हो या वेबसाइट पर कोई नई लिंक एक्टिव हुई हो): तो यह साफ बताएं कि लिंक कब एक्टिव हुई है, लॉगिन करके कैसे चेक/डाउनलोड करना है, उसमें कौन-सी डिटेल्स मिलानी हैं और अगला स्टेप क्या होगा।
+           - यदि यह **Admit Card / Result / Answer Key** है: तो यह साफ बताएं कि लिंक कब एक्टिव हुई है, लॉगिन करके कैसे चेक/डाउनलोड करना है, उसमें कौन-सी डिटेल्स मिलानी हैं और अगला स्टेप क्या होगा।
         5. **Important Official Links Table और 5 FAQs:**
            - अंत में डायरेक्ट पीडीएफ/एक्टिव लिंक ({target_url}) और आधिकारिक वेबसाइट ({portal_url}) की टेबल बनाएं और 5 अक्सर पूछे जाने वाले प्रश्न (FAQs) लिखें।
            - आउटपुट सिर्फ शुद्ध HTML (`<h2>`, `<h3>`, `<p>`, `<ul>`, `<ol>`, `<table>`) में दें, कोई markdown ```html ब्लॉक न लगाएं।
@@ -797,6 +793,7 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
         - विभाग: {org_name} ({short_org})
         - आधिकारिक नोटिस/लिंक का नाम: {raw_notice}
         - फॉर्मेट: {doc_format}
+        - साप्ताहिक गूगल क्रॉस-चेक नोट: {weekly_update_note}
         - गूगल क्रॉस-चेक व ट्रेंडिंग एसईओ संदर्भ: {trending_ref} | {google_context}
         - मुख्य विवरण: कुल पद: {total_posts} | योग्यता: {qualification} | आयु: {age_limit} | शुल्क: {app_fee} | वेतन: {salary_info} | तिथि: {exam_date}
         - पीडीएफ/वेबपेज का मूल टेक्स्ट: {source_text[:3800]}
@@ -805,11 +802,11 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
         if ai_html:
             clean_ai_html = re.sub(r'^```html\s*|\s*```$', '', ai_html.strip(), flags=re.I)
             if len(clean_ai_html.split()) >= 800:
-                return research_data["seo_title"], clean_ai_html
+                return research_data["seo_title"], f"{weekly_banner_html}\n{clean_ai_html}".strip()
 
     overview_6_line_table = f"""
     <h2>{short_exam}: एक नज़र में संपूर्ण विवरण (Quick Overview Table)</h2>
-    <p>जो उम्मीदवार कम समय में इस आधिकारिक अपडेट की पूरी जानकारी समझना चाहते हैं, उनके लिए हमने नीचे 6 मुख्य बिंदुओं की यह सारणी (Overview Table) तैयार की है। इसमें विभाग के नाम से लेकर आधिकारिक लिंक तक सभी जरूरी तथ्य शामिल हैं:</p>
+    <p>जो उम्मीदवार कम समय में इस आधिकारिक अपडेट की पूरी जानकारी समझना चाहते हैं, उनके लिए हमने नीचे मुख्य बिंदुओं की यह सारणी (Overview Table) तैयार की है। इसमें विभाग के नाम से लेकर आधिकारिक लिंक तक सभी जरूरी तथ्य शामिल हैं:</p>
     <table border="1" cellpadding="10" cellspacing="0" style="width:100%; border-collapse:collapse; margin:15px 0 25px 0;">
         <tbody>
             <tr style="background-color:#f8f9fa;"><td><strong>1. भर्ती बोर्ड / विभाग का नाम</strong></td><td>{org_name}</td></tr>
@@ -817,7 +814,7 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
             <tr style="background-color:#f8f9fa;"><td><strong>3. जारी अपडेट की श्रेणी (Category)</strong></td><td>Official {category} ({doc_format})</td></tr>
             <tr><td><strong>4. आधिकारिक नोटिस / लिंक का विषय</strong></td><td>{raw_notice}</td></tr>
             <tr style="background-color:#f8f9fa;"><td><strong>5. पद संख्या एवं पात्रता सार</strong></td><td>{total_posts} | {qualification}</td></tr>
-            <tr><td><strong>6. नोटिस/लिंक जारी होने की तिथि</strong></td><td>{release_date} (महत्वपूर्ण तिथि: {exam_date})</td></tr>
+            <tr><td><strong>6. ताज़ा अपडेट / पुनरीक्षण तिथि</strong></td><td>{release_date} (महत्वपूर्ण तिथि: {exam_date})</td></tr>
             <tr style="background-color:#f8f9fa;"><td><strong>7. आधिकारिक वेबसाइट</strong></td><td><a href="{portal_url}" target="_blank" rel="noopener">{portal_name} ({portal_url})</a></td></tr>
         </tbody>
     </table>
@@ -825,7 +822,7 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
 
     student_verification_box = f"""
     <div style="background-color:#eef6ff; border-left:5px solid #0056b3; padding:15px; margin:20px 0; border-radius:4px;">
-        <strong>🔍 पीडीएफ एवं एक्टिव लिंक की बारीकी से जांच (Editorial Verification Note):</strong> हमारी टीम द्वारा <strong>{portal_name}</strong> और गूगल अपडेट्स से क्रॉस-चेक करने के बाद यह पुष्टि की गई है कि <em>“{raw_notice}”</em> से जुड़ा यह {doc_format} अपडेट पूर्णतः नया और आधिकारिक है। छात्रों की सुविधा के लिए हमने इसके सभी महत्वपूर्ण नियमों को नीचे पैराग्राफ और आसान बुलेट पॉइंट्स में समझाया है।
+        <strong>🔍 पीडीएफ एवं एक्टिव लिंक की बारीकी से जांच (Editorial Verification Note):</strong> हमारी टीम द्वारा <strong>{portal_name}</strong> और गूगल अपडेट्स से क्रॉस-चेक करने के बाद यह पुष्टि की गई है कि <em>“{raw_notice}”</em> से जुड़ा यह {doc_format} अपडेट पूर्णतः प्रामाणिक और आधिकारिक है। छात्रों की सुविधा के लिए हमने इसके सभी महत्वपूर्ण नियमों को नीचे पैराग्राफ और आसान बुलेट पॉइंट्स में समझाया है।
     </div>
     """
 
@@ -842,7 +839,8 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
 
     if category == "Result":
         body_sections = f"""
-        <p><strong>{org_name}</strong> ने प्रतियोगी परीक्षा में शामिल हुए लाखों अभ्यर्थियों का इंतजार खत्म करते हुए आज <strong>{core_exam}</strong> का आधिकारिक परिणाम (Result / Merit List) जारी कर दिया है। विभाग के आधिकारिक पोर्टल पर यह ताज़ा अपडेट <em>“{raw_notice}”</em> शीर्षक के साथ सक्रिय किया गया है। वे सभी उम्मीदवार जिन्होंने इस परीक्षा में भाग लिया था, वे अब नीचे दिए गए डायरेक्ट लिंक की मदद से अपना रोल नंबर और चयन की स्थिति (Qualifying Status) जांच सकते हैं।</p>
+        {weekly_banner_html}
+        <p><strong>{org_name}</strong> ने प्रतियोगी परीक्षा में शामिल हुए लाखों अभ्यर्थियों का इंतजार खत्म करते हुए <strong>{core_exam}</strong> का आधिकारिक परिणाम (Result / Merit List) जारी कर दिया है। विभाग के आधिकारिक पोर्टल पर यह ताज़ा अपडेट <em>“{raw_notice}”</em> शीर्षक के साथ सक्रिय किया गया है। वे सभी उम्मीदवार जिन्होंने इस परीक्षा में भाग लिया था, वे अब नीचे दिए गए डायरेक्ट लिंक की मदद से अपना रोल नंबर और चयन की स्थिति (Qualifying Status) जांच सकते हैं।</p>
         <p>अक्सर जब कोई बड़ा रिजल्ट जारी होता है, तो वेबसाइट पर ट्रैफिक अधिक होने या पीडीएफ लंबी होने के कारण छात्रों को अपना नाम ढूंढने में परेशानी होती है। इसी बात को ध्यान में रखते हुए हमने इस लेख में रिजल्ट लिंक के क्रॉस-चेक विवरण, कट-ऑफ (Cut-Off Marks) के नियमों और आगे होने वाले डॉक्यूमेंट वेरिफिकेशन की पूरी जानकारी क्रमवार तैयार की है।</p>
         {student_verification_box}
         {overview_6_line_table}
@@ -892,6 +890,7 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
 
     elif category == "Admit Card":
         body_sections = f"""
+        {weekly_banner_html}
         <p><strong>{org_name}</strong> ने <strong>{core_exam}</strong> परीक्षा की तैयारी कर रहे उम्मीदवारों के लिए आधिकारिक प्रवेश पत्र (Admit Card / Hall Ticket) और परीक्षा शहर की सूचना से जुड़ी नई लिंक जारी कर दी है। विभाग की वेबसाइट पर यह अपडेट <em>“{raw_notice}”</em> के नाम से एक्टिव किया गया है। जिन अभ्यर्थियों ने इस भर्ती के लिए सफलतापूर्वक ऑनलाइन आवेदन किया था, वे अब अपने लॉगिन विवरण की सहायता से अपना एडमिट कार्ड डाउनलोड कर सकते हैं।</p>
         <p>हमने गूगल और आधिकारिक पोर्टल पर क्रॉस-चेक करके यह सुनिश्चित किया है कि यह लिंक/सूचना हाल ही में सक्रिय हुई है। परीक्षा से पहले हर छात्र को अपने परीक्षा केंद्र के पते, रिपोर्टिंग टाइम और शिफ्ट के नियमों की सटीक जानकारी होनी चाहिए, जिसे हमने नीचे पैराग्राफ और बुलेट पॉइंट्स में विस्तार से समझाया है।</p>
         {student_verification_box}
@@ -931,6 +930,7 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
 
     elif category == "Answer Key":
         body_sections = f"""
+        {weekly_banner_html}
         <p><strong>{org_name}</strong> ने हाल ही में संपन्न हुई <strong>{core_exam}</strong> परीक्षा की आधिकारिक उत्तर कुंजी (Answer Key) और रिस्पॉन्स शीट (Response Sheet) से जुड़ा नया अपडेट जारी कर दिया है। आधिकारिक वेबसाइट पर यह सूचना <em>“{raw_notice}”</em> शीर्षक के अंतर्गत लाइव की गई है। परीक्षा में बैठने वाले सभी छात्र अब अपने लॉगिन विवरण के माध्यम से अपने द्वारा चुने गए उत्तरों और बोर्ड के सही उत्तरों का मिलान कर सकते हैं।</p>
         <p>रिजल्ट आने से पहले अपने संभावित नंबर (Raw Score) जानने और यदि किसी प्रश्न में आयोग से गलती हुई है तो उस पर आपत्ति (Objection) दर्ज कराने का यह सबसे महत्वपूर्ण अवसर होता है। हमने इस नई लिंक/पीडीएफ की पूरी जांच करके नीचे सभी नियम आसान पैराग्राफ और पॉइंट्स में दिए हैं।</p>
         {student_verification_box}
@@ -969,8 +969,9 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
 
     else:
         body_sections = f"""
+        {weekly_banner_html}
         <p><strong>{org_name}</strong> ने सरकारी नौकरी की तलाश कर रहे योग्य उम्मीदवारों के लिए <strong>{core_exam}</strong> भर्ती का आधिकारिक विज्ञापन (Official Notification) जारी कर दिया है। विभाग के आधिकारिक पोर्टल पर यह नई भर्ती सूचना <em>“{raw_notice}”</em> शीर्षक के अंतर्गत प्रकाशित की गई है। जो भी युवा केंद्र या राज्य सरकार के इस प्रतिष्ठित विभाग में अपनी सेवाएं देना चाहते हैं, उनके लिए यह एक अत्यंत सुनहरा अवसर है।</p>
-        <p>हमने इस नए नोटिफिकेशन पीडीएफ को डाउनलोड करके इसकी बारीकी से जांच की है ताकि आपको लंबी-चौड़ी फाइल पढ़ने में समय न गंवाना पड़े। इस लेख में आपको सबसे पहले 6-लाइन की ओवरव्यू टेबल मिलेगी और उसके बाद शैक्षणिक योग्यता, आयु सीमा, आवेदन शुल्क, वेतनमान और ऑनलाइन फॉर्म भरने की पूरी जानकारी साफ-सुथरे पैराग्राफ व बुलेट पॉइंट्स में पढ़ने को मिलेगी।</p>
+        <p>हमने इस नए नोटिफिकेशन पीडीएफ को डाउनलोड करके इसकी बारीकी से जांच की है ताकि आपको लंबी-चौड़ी फाइल पढ़ने में समय न गंवाना पड़े। इस लेख में आपको सबसे पहले ओवरव्यू टेबल मिलेगी और उसके बाद शैक्षणिक योग्यता, आयु सीमा, आवेदन शुल्क, वेतनमान और ऑनलाइन फॉर्म भरने की पूरी जानकारी साफ-सुथरे पैराग्राफ व बुलेट पॉइंट्स में पढ़ने को मिलेगी।</p>
         {student_verification_box}
         {overview_6_line_table}
 
@@ -1034,8 +1035,8 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
     <h2>अक्सर पूछे जाने वाले प्रश्न (FAQs) – {short_exam}</h2>
     <p>इस अपडेट को लेकर छात्रों द्वारा सबसे ज्यादा पूछे जाने वाले सवालों के संक्षिप्त उत्तर नीचे दिए गए हैं:</p>
     <ul>
-        <li><strong>प्रश्न 1: {short_exam} का यह आधिकारिक अपडेट कब जारी किया गया है?</strong><br>
-        उत्तर: विभाग द्वारा यह आधिकारिक {doc_format} अपडेट {release_date} को आधिकारिक पोर्टल पर जारी/सक्रिय किया गया है।</li>
+        <li><strong>प्रश्न 1: {short_exam} का यह आधिकारिक अपडेट कब जारी/अपडेट किया गया है?</strong><br>
+        उत्तर: विभाग द्वारा यह आधिकारिक {doc_format} अपडेट {release_date} को आधिकारिक पोर्टल पर सत्यापित/सक्रिय किया गया है।</li>
         <li><strong>प्रश्न 2: यह सूचना किस भर्ती बोर्ड द्वारा जारी की गई है?</strong><br>
         उत्तर: यह सूचना आधिकारिक तौर पर <strong>{org_name}</strong> द्वारा जारी की गई है।</li>
         <li><strong>प्रश्न 3: {core_exam} के लिए मुख्य पात्रता या पद विवरण क्या है?</strong><br>
@@ -1054,13 +1055,8 @@ def generate_professional_1000_words_article(portal_info, research_data, target_
 # 8. WORDPRESS PUBLISHER + STARTUP CONNECTION DIAGNOSTIC
 # =====================================================================
 def test_wordpress_connection():
-    """
-    Code shuru hote hi check karta hai ki WordPress par post kyun nahi ja rahi hai.
-    """
     if not WP_USERNAME or "your_wp_username" in WP_USERNAME or "your_wp_application_password" in WP_APP_PASSWORD:
         print("   [WP WARNING] WordPress Username ya Application Password abhi set nahi hai!")
-        print("   -> Agar GitHub Actions par chala rahe hain toh Settings -> Secrets me WP_USERNAME aur WP_APP_PASSWORD dalein.")
-        print("   -> Agar PC par chala rahe hain toh code me line 30-32 par apna Username aur App Password dalein.")
         return False
 
     try:
@@ -1078,7 +1074,6 @@ def test_wordpress_connection():
             return True
         else:
             print(f"   [WP AUTH ERROR {res.status_code}] Website ne login reject kiya: {res.text[:180]}")
-            print("   -> Check karein ki WP Admin -> Users -> Profile me जाकर आपने 'Application Password' banaya hai (Normal login password REST API me kaam nahi karta).")
             return False
     except Exception as e:
         print(f"   [WP CONNECTION FAILED] {e}")
@@ -1117,7 +1112,8 @@ def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
         if res.status_code in [200, 201]:
             wp_id = res.json().get("id", 0)
             wp_link = res.json().get("link", "")
-            print(f"    [SUCCESS] Article Uploaded to WordPress ({WP_POST_STATUS.upper()} | ID: {wp_id}) -> {wp_link}")
+            action_word = "UPDATED" if existing_wp_id > 0 else "UPLOADED"
+            print(f"    [SUCCESS] Article {action_word} on WordPress ({WP_POST_STATUS.upper()} | ID: {wp_id}) -> {wp_link}")
             return wp_id
         else:
             print(f"    [!] WordPress API Status: {res.status_code} - {res.text[:200]}")
@@ -1126,7 +1122,103 @@ def save_or_update_wordpress_draft(title, html_content, existing_wp_id=0):
     return 0
 
 # =====================================================================
-# 9. SMART SCANNER WITH COMPLETE INITIAL LOCK (HTML + RSS BOTH LOCKED)
+# 9. WEDNESDAY EXPERIENCED EDITOR AUTO-UPDATER (GOOGLE CROSS-CHECK)
+# =====================================================================
+def find_portal_info_by_url(portal_url):
+    domain = urlparse(portal_url).netloc.lower()
+    for p in GOVT_PORTALS:
+        if domain in urlparse(p["url"]).netloc.lower():
+            return p
+    return GOVT_PORTALS[0]
+
+def run_wednesday_article_updater(bot_start_dt):
+    """
+    हर बुधवार (Wednesday) को चलने वाला अनुभवी एडिटर फंक्शन:
+    1. चेक करता है कि क्या आज बुधवार (weekday == 2) है।
+    2. डेटाबेस से पुराने पब्लिश/ड्राफ्ट किए गए आर्टिकल्स (wp_post_id > 0) निकालता है जो आज अपडेट नहीं हुए हैं।
+    3. पहले Google News RSS (पिछले 7 दिन) और आधिकारिक लिंक पर क्रॉस-चेक करता है।
+    4. एक अनुभवी वर्कर की तरह ताज़ा स्टेटस जोड़कर WordPress पर उसी पोस्ट (wp_post_id) को अपडेट करता है।
+    """
+    now_dt = datetime.datetime.now()
+    if now_dt.weekday() != 2:  # Monday=0, Tuesday=1, Wednesday=2
+        return
+
+    today_str = now_dt.strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, portal_url, target_url, raw_notice_title, seo_title, category, wp_post_id, content_hash
+        FROM processed_posts
+        WHERE wp_post_id > 0
+          AND DATE(updated_at) < ?
+        ORDER BY updated_at ASC
+        LIMIT 3
+    """, (today_str,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        print("\n   [WEDNESDAY UPDATER] Aaj Wednesday hai, aur sabhi purane articles pehle hi update aur cross-check ho chuke hain.")
+        return
+
+    print(f"\n   [WEDNESDAY EDITORIAL UPDATER] Aaj Wednesday hai! {len(rows)} purane articles ko Google par cross-check karke update kiya ja raha hai...")
+
+    for row in rows:
+        db_id, portal_url, target_url, raw_title, old_seo_title, old_cat, wp_post_id, old_hash = row
+        portal_info = find_portal_info_by_url(portal_url)
+        short_org = portal_info["short_org"]
+
+        print(f"   -> [Cross-Checking Old Article ID #{wp_post_id}] {old_seo_title[:65]}...")
+
+        # 1. Google News par pichhle 7 dino ka cross-check
+        google_7d_data = cross_check_active_link_on_google(short_org, raw_title, old_cat, bot_start_dt, time_window="7d")
+        # 2. Target URL / Official Page ko dobara inspect karna
+        source_text, doc_format, _, _, pdf_headings = extract_source_and_metadata(target_url)
+
+        snippets_list = google_7d_data.get("google_snippets", [])
+        combined_latest_signals = " ".join(snippets_list + [raw_title, source_text[:1000]])
+        updated_category = determine_category(combined_latest_signals) if snippets_list else old_cat
+
+        # 3. Experienced Editor Note taiyar karna (Gemini + Google Verification)
+        weekly_editorial_note = (
+            f"हमारी एडिटोरियल टीम ने आज बुधवार ({now_dt.strftime('%d %B %Y')}) को गूगल और "
+            f"<strong>{portal_info['portal_name']}</strong> पर इस अपडेट को दोबारा क्रॉस-चेक किया है। "
+            f"वर्तमान में इसकी आधिकारिक लिंक और दिशा-निर्देश पूर्णतः सक्रिय हैं।"
+        )
+
+        if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key":
+            check_prompt = f"""
+            आप एक अनुभवी सरकारी नौकरी कंटेंट एडिटर हैं। आज बुधवार ({now_dt.strftime('%d %B %Y')}) को आप अपने पुराने आर्टिकल "{old_seo_title}" को गूगल और आधिकारिक वेबसाइट से क्रॉस-चेक करके अपडेट कर रहे हैं।
+            - विभाग: {portal_info['org']}
+            - मूल नोटिस: {raw_title}
+            - पिछले 7 दिनों के गूगल न्यूज़ अपडेट्स: {" | ".join(snippets_list[:4]) if snippets_list else "कोई नया बदलाव नहीं, पुरानी प्रक्रिया चालू है"}
+            - आधिकारिक पेज का ताज़ा टेक्स्ट: {source_text[:1500]}
+
+            कृपया 2 से 3 वाक्यों में एक प्रोफेशनल 'साप्ताहिक एडिटोरियल रिव्यू नोट' (Hindi में) लिखें जो छात्रों को बताए कि आज बुधवार को गूगल और आधिकारिक पोर्टल पर क्रॉस-चेक करने पर इस भर्ती/परीक्षा की वर्तमान स्थिति क्या है।
+            """
+            ai_note = call_gemini_json_or_text(check_prompt, expect_json=False)
+            if ai_note and len(ai_note.strip()) > 25:
+                weekly_editorial_note = sanitize_clean_text(ai_note)
+
+        # 4. Blueprint aur Updated 1000+ Words Article banana
+        research_data = build_article_blueprint(
+            portal_info, raw_title, source_text, updated_category, pdf_headings, google_7d_data, weekly_editorial_note
+        )
+        new_seo_title, updated_html = generate_professional_1000_words_article(
+            portal_info, research_data, target_url, updated_category, source_text, doc_format, weekly_update_note=weekly_editorial_note
+        )
+
+        # 5. WordPress par usi Post ID ko update karna
+        updated_wp_id = save_or_update_wordpress_draft(new_seo_title, updated_html, existing_wp_id=wp_post_id)
+        if updated_wp_id > 0:
+            new_hash = hashlib.md5((new_seo_title + weekly_editorial_note).encode("utf-8", errors="ignore")).hexdigest()
+            update_processed_post_record(db_id, new_seo_title, updated_category, new_hash)
+            print(f"      [WEDNESDAY UPDATE SUCCESS] Post ID #{wp_post_id} successfully refreshed with Google cross-check!")
+
+        time.sleep(1.0)
+
+# =====================================================================
+# 10. SMART SCANNER WITH COMPLETE INITIAL LOCK (HTML + RSS BOTH LOCKED)
 # =====================================================================
 def fetch_fallback_updates_for_js_portal(portal_info):
     discovered = []
@@ -1179,11 +1271,10 @@ def run_hourly_scanner(bot_start_dt):
         except Exception:
             print(f"   [{idx:02d}/{total_portals}] [Direct Connect Slow] Using Smart Backup for: {portal_name}")
 
-        # Always include fallback RSS items so during Initial Lock, existing RSS items ALSO get locked!
         if len(candidate_links) < 15 or not portal_already_synced:
             candidate_links.extend(fetch_fallback_updates_for_js_portal(portal_info))
 
-        # STEP A: Complete Initial Baseline Lock (Locks ALL currently existing website & RSS links)
+        # STEP A: Complete Initial Baseline Lock
         if not portal_already_synced:
             for link_text, full_target_url in candidate_links:
                 n_key = normalize_notice_key(portal, link_text)
@@ -1205,17 +1296,14 @@ def run_hourly_scanner(bot_start_dt):
             if is_already_processed(unique_target, notice_key=n_key):
                 continue
 
-            # 1. Download PDF or Inspect Active Link + Extract Headings
             source_text, doc_format, last_mod, pdf_date, pdf_headings = extract_source_and_metadata(full_target_url)
             content_hash = hashlib.md5((link_text + source_text[:500]).encode("utf-8", errors="ignore")).hexdigest()
 
             combined_info = (link_text + " " + full_target_url).lower()
             category = determine_category(combined_info)
 
-            # 2. Cross-Check on Google
             google_cross_data = cross_check_active_link_on_google(portal_info["short_org"], link_text, category, bot_start_dt)
 
-            # 3. STRICT Check: Must be published on or after bot_start_dt!
             is_fresh, reason, ai_purpose = verify_is_truly_published_after_bot_start(
                 portal_info, link_text, source_text, doc_format, last_mod, pdf_date, google_cross_data, bot_start_dt
             )
@@ -1224,7 +1312,6 @@ def run_hourly_scanner(bot_start_dt):
                 mark_as_processed(portal, unique_target, n_key, link_text[:100], f"OLD_REJECTED ({reason})", "IGNORED_OLD", 0, content_hash)
                 continue
 
-            # 4. Build SEO Title & Heading Blueprint
             research_data = build_article_blueprint(
                 portal_info, link_text, source_text, category, pdf_headings, google_cross_data, ai_purpose
             )
@@ -1238,7 +1325,6 @@ def run_hourly_scanner(bot_start_dt):
             print(f"       [VERIFICATION] -> {reason}")
             print(f"       [SEO TITLE] -> {proposed_seo_title}")
 
-            # 5. Write 1000+ Words Article
             seo_title, article_html = generate_professional_1000_words_article(
                 portal_info, research_data, full_target_url, category, source_text, doc_format
             )
@@ -1260,6 +1346,9 @@ def run_hourly_scanner(bot_start_dt):
         print("\n   [STATUS] Scan complete. Sabhi 39 portals check ho gaye, code dalne ke baad abhi koi naya update nahi aaya hai.")
     else:
         print(f"\n   [STATUS] Scan complete! Total {new_found_total} naye articles WordPress ({WP_POST_STATUS}) mein bheje gaye.")
+
+    # STEP C: Har Wednesday ko purane articles ko Google par cross-check karke update karein
+    run_wednesday_article_updater(bot_start_dt)
 
 if __name__ == "__main__":
     disable_cmd_quickedit()
