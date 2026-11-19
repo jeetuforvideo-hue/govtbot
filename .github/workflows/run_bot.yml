@@ -2,7 +2,7 @@ name: GovtVibhag Auto Content Writer
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,9 +30,6 @@ jobs:
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WP_POST_STATUS: draft
-          MAX_NOTICE_AGE_HOURS: "2"
-          POST_RUN_ONLY: "true"
-          ENABLE_FALLBACK: "true"
           MIN_ARTICLE_WORDS: "1050"
         run: python gov_vibhaf_master.py
 
@@ -40,5 +37,5 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add scraped_data_cache/govtvibhag_latest.db || true
+          git add scraped_data_cache/govtvibhag_boot.db scraped_data_cache/govtvibhag_from_now.db scraped_data_cache/govtvibhag_latest.db || true
           git diff --staged --quiet || (git commit -m "Update bot database state" && git push)
