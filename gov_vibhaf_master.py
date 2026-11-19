@@ -13,10 +13,12 @@ from bs4 import BeautifulSoup
 
 try:
     import pymupdf as fitz
+
     PYMUPDF_AVAILABLE = True
 except ImportError:
     try:
         import fitz
+
         PYMUPDF_AVAILABLE = True
     except ImportError:
         PYMUPDF_AVAILABLE = False
@@ -704,9 +706,9 @@ def call_gemini_writer(prompt: str) -> str:
 
 
 def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, stage: str, details: dict) -> str:
-    org = portal_info["org"]
-    short_org = portal_info["short_org"]
-    portal_url = portal_info["url"]
+    org = portal_info.get("org") or portal_info.get("short_org") or "Government Department"
+    short_org = portal_info.get("short_org") or org
+    portal_url = portal_info.get("portal_url") or portal_info.get("url") or CONFIG["wp_site_url"]
     updated_now = now_ist_str()
 
     overview_table = f"""
