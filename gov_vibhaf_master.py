@@ -6,7 +6,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote_plus, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,7 +25,7 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. कॉन्फ़िगरेशन (DIRECT PORTAL + SMART FALLBACK + 1-2H LATEST + DRAFT)
+# 1. कॉन्फ़िगरेशन (FROM-NOW-ON CUTOFF + DRAFT + NO REPEAT + LIVE UPDATE)
 # ==============================================================================
 CONFIG = {
     "site_name": "GovtVibhag",
@@ -35,15 +35,13 @@ CONFIG = {
     "wp_post_status": os.getenv("WP_POST_STATUS", "draft").strip().lower(),  # पहले चेक करने के लिए 'draft'
     "gemini_api_key": os.getenv("GEMINI_API_KEY", "").strip(),
     "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
-    "db_path": os.getenv("DB_PATH", "scraped_data_cache/govtvibhag_latest.db").strip(),
+    "db_path": os.getenv("DB_PATH", "scraped_data_cache/govtvibhag_from_now.db").strip(),
     "cache_dir": os.getenv("CACHE_DIR", "scraped_data_cache").strip(),
     "min_words": int(os.getenv("MIN_ARTICLE_WORDS", "1050")),
-    "max_items_per_portal": int(os.getenv("MAX_ITEMS_PER_PORTAL", "5")),
-    "max_new_posts_per_run": int(os.getenv("MAX_NEW_POSTS_PER_RUN", "6")),
-    "max_updates_per_run": int(os.getenv("MAX_UPDATES_PER_RUN", "6")),
+    "max_items_per_portal": int(os.getenv("MAX_ITEMS_PER_PORTAL", "6")),
+    "max_new_posts_per_run": int(os.getenv("MAX_NEW_POSTS_PER_RUN", "8")),
+    "max_updates_per_run": int(os.getenv("MAX_UPDATES_PER_RUN", "8")),
     "request_timeout": int(os.getenv("REQUEST_TIMEOUT", "20")),
-    "max_notice_age_hours": float(os.getenv("MAX_NOTICE_AGE_HOURS", "2")),
-    "post_run_only": os.getenv("POST_RUN_ONLY", "true").lower() == "true",
     "enable_fallback": os.getenv("ENABLE_FALLBACK", "true").lower() == "true",
 }
 
@@ -192,13 +190,12 @@ def init_db() -> None:
         )
     """)
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS observed_notices (
+        CREATE TABLE IF NOT EXISTS baseline_snapshot (
             notice_sig TEXT PRIMARY KEY,
             portal_url TEXT,
             raw_title TEXT,
             target_url TEXT,
-            first_seen_iso TEXT,
-            last_seen_iso TEXT
+            locked_at_iso TEXT
         )
     """)
     cur.execute("""
@@ -211,50 +208,47 @@ def init_db() -> None:
     conn.close()
 
 
-def get_or_set_workflow_start_dt(run_started_dt: datetime) -> datetime:
+def get_or_lock_boot_time(current_boot_dt: datetime) -> tuple[datetime, bool]:
+    """
+    पहली बार बोट चालू करते ही समय लॉक करता है (is_first_boot = True)।
+    बाद के रन्स में वही लॉक समय रहता है ताकि बोट चालू करने से पहले की चीज़ों पर नया आर्टिकल न बने।
+    """
     conn = sqlite3.connect(CONFIG["db_path"])
     cur = conn.cursor()
-    cur.execute("SELECT meta_value FROM runtime_meta WHERE meta_key = 'workflow_baseline_iso'")
+    cur.execute("SELECT meta_value FROM runtime_meta WHERE meta_key = 'boot_started_iso'")
     row = cur.fetchone()
     if not row:
         cur.execute(
-            "INSERT OR REPLACE INTO runtime_meta (meta_key, meta_value) VALUES ('workflow_baseline_iso', ?)",
-            (run_started_dt.isoformat(),),
+            "INSERT OR REPLACE INTO runtime_meta (meta_key, meta_value) VALUES ('boot_started_iso', ?)",
+            (current_boot_dt.isoformat(),),
         )
         conn.commit()
         conn.close()
-        return run_started_dt
+        return current_boot_dt, True
     conn.close()
     try:
-        saved_dt = datetime.fromisoformat(row[0])
-        return max(saved_dt, run_started_dt)
+        return datetime.fromisoformat(row[0]), False
     except Exception:
-        return run_started_dt
+        return current_boot_dt, False
 
 
-def get_observed_notice(notice_sig: str) -> dict | None:
+def is_in_baseline_snapshot(notice_sig: str) -> bool:
     conn = sqlite3.connect(CONFIG["db_path"])
     cur = conn.cursor()
-    cur.execute(
-        "SELECT notice_sig, first_seen_iso, last_seen_iso FROM observed_notices WHERE notice_sig = ?",
-        (notice_sig,),
-    )
+    cur.execute("SELECT 1 FROM baseline_snapshot WHERE notice_sig = ?", (notice_sig,))
     row = cur.fetchone()
     conn.close()
-    if not row:
-        return None
-    return {"notice_sig": row[0], "first_seen_iso": row[1], "last_seen_iso": row[2]}
+    return row is not None
 
 
-def touch_observed_notice(notice_sig: str, portal_url: str, raw_title: str, target_url: str) -> None:
+def add_to_baseline_snapshot(notice_sig: str, portal_url: str, raw_title: str, target_url: str) -> None:
     iso_now = now_ist_dt().isoformat()
     conn = sqlite3.connect(CONFIG["db_path"])
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO observed_notices (notice_sig, portal_url, raw_title, target_url, first_seen_iso, last_seen_iso)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(notice_sig) DO UPDATE SET last_seen_iso = excluded.last_seen_iso""",
-        (notice_sig, portal_url, raw_title[:200], target_url, iso_now, iso_now),
+        """INSERT OR IGNORE INTO baseline_snapshot (notice_sig, portal_url, raw_title, target_url, locked_at_iso)
+           VALUES (?, ?, ?, ?, ?)""",
+        (notice_sig, portal_url, raw_title[:200], target_url, iso_now),
     )
     conn.commit()
     conn.close()
@@ -384,13 +378,9 @@ def is_valid_notice_candidate(title: str, full_url: str) -> bool:
 
 
 # ==============================================================================
-# 5. लचीला HTTP फेचर + स्मार्ट बैकअप फ़ॉलबैक + 1-2 घंटे / पोस्ट-रन फ़िल्टर
+# 5. लचीला HTTP फेचर + स्मार्ट बैकअप फ़ॉलबैक + "बोट चालू होने के बाद" जांच
 # ==============================================================================
 def fetch_url_flexible(url: str) -> requests.Response | None:
-    """
-    बिना अनावश्यक 'स्लो' बाइट-सीमा के पेज/PDF लाता है;
-    यदि SSL/संकेत में हल्की दिक्कत हो तो सुरक्षित रूप से हैंडल करता है।
-    """
     try:
         resp = requests.get(
             url,
@@ -406,10 +396,6 @@ def fetch_url_flexible(url: str) -> requests.Response | None:
 
 
 def fetch_fallback_updates(portal_info: dict) -> list[dict]:
-    """
-    यदि किसी पोर्टल से GitHub IP पर डायरेक्ट कनेक्शन धीमा या ब्लॉक हो,
-    तो Google News RSS से उस विभाग के ताज़ा अपडेट्स उठाता है।
-    """
     results = []
     if not CONFIG["enable_fallback"]:
         return results
@@ -442,7 +428,11 @@ def fetch_fallback_updates(portal_info: dict) -> list[dict]:
             if pub_el and pub_el.text:
                 try:
                     p_utc = parsedate_to_datetime(pub_el.text.strip())
-                    pub_dt = p_utc.astimezone(IST_TZ).replace(tzinfo=None) if p_utc.tzinfo else p_utc + timedelta(hours=5, minutes=30)
+                    pub_dt = (
+                        p_utc.astimezone(IST_TZ).replace(tzinfo=None)
+                        if p_utc.tzinfo
+                        else p_utc + timedelta(hours=5, minutes=30)
+                    )
                 except Exception:
                     pub_dt = None
 
@@ -528,46 +518,27 @@ def extract_timestamp_details(
     return None, False
 
 
-def is_eligible_new_article(details: dict, notice_sig: str, workflow_start_dt: datetime) -> tuple[bool, str]:
-    max_hours = CONFIG["max_notice_age_hours"]
-    ref_now = now_ist_dt()
-    cutoff = ref_now - timedelta(hours=max_hours)
+def is_arrived_after_boot(details: dict, notice_sig: str, boot_cutoff_dt: datetime) -> tuple[bool, str]:
+    """
+    नियम:
+    - बोट चालू होने के समय (boot_cutoff_dt) से पहले वेबसाइट पर जो भी था (baseline_snapshot में लॉक),
+      उस पर नया आर्टिकल नहीं बनेगा।
+    - यदि किसी नोटिस/PDF की स्पष्ट तारीख/समय बोट चालू होने के समय से पहले का है, तो भी नया आर्टिकल नहीं बनेगा।
+    - बोट चालू होने के बाद आने वाले नए अपडेट्स पर आर्टिकल बनेगा।
+    """
+    if is_in_baseline_snapshot(notice_sig):
+        return False, "बोट चालू करने से पहले का डाटा (Baseline में लॉक)"
 
     det_dt = details.get("detected_dt")
     has_exact_time = bool(details.get("has_exact_time"))
-    observed = get_observed_notice(notice_sig)
 
     if det_dt is not None:
-        if det_dt > ref_now + timedelta(minutes=15):
-            return False, f"भविष्य की संदिग्ध तारीख/समय ({det_dt.strftime('%d-%m-%Y %H:%M')})"
+        if has_exact_time and det_dt < boot_cutoff_dt:
+            return False, f"बोट चालू होने ({boot_cutoff_dt.strftime('%d-%m-%Y %H:%M')}) से पहले का अपडेट"
+        if not has_exact_time and det_dt.date() < boot_cutoff_dt.date():
+            return False, f"बोट चालू होने की तारीख से पहले का नोटिस ({det_dt.strftime('%d-%m-%Y')})"
 
-        if has_exact_time:
-            if CONFIG["post_run_only"] and det_dt < workflow_start_dt:
-                return False, f"वर्कफ़्लो शुरू होने ({workflow_start_dt.strftime('%d-%m-%Y %H:%M')}) से पहले का अपडेट"
-            if det_dt < cutoff:
-                return False, f"अपडेट {det_dt.strftime('%d-%m-%Y %H:%M')} का है ({max_hours:g} घंटे से पुराना)"
-            return True, f"Post-Workflow & {max_hours:g}h Latest Verified"
-        else:
-            if det_dt.date() < ref_now.date():
-                return False, f"पुरानी तारीख ({det_dt.strftime('%d-%m-%Y')})"
-            if CONFIG["post_run_only"] and det_dt.date() < workflow_start_dt.date():
-                return False, "वर्कफ़्लो शुरू होने से पहले की तारीख"
-            if observed is not None:
-                first_seen = datetime.fromisoformat(observed["first_seen_iso"])
-                if first_seen < workflow_start_dt:
-                    return False, "वर्कफ़्लो शुरू होने से पहले देखा गया पुराना नोटिस"
-            return True, "Today Latest Verified"
-
-    if observed is None:
-        return False, "स्पष्ट नई जारी तारीख/समय प्रमाणित नहीं हुई (पहले से मौजूद/देर से दिखे नोटिस से बचाव)"
-
-    first_seen = datetime.fromisoformat(observed["first_seen_iso"])
-    if CONFIG["post_run_only"] and first_seen < workflow_start_dt:
-        return False, "वर्कफ़्लो शुरू होने से पहले से मौजूद पुराना नोटिस"
-    if first_seen < cutoff:
-        return False, f"{max_hours:g} घंटे की ताज़ा विंडो से बाहर"
-
-    return True, "Freshly Observed After Workflow Start"
+    return True, "बोट चालू होने के बाद आया नया अपडेट"
 
 
 def extract_context_details(raw_title: str, target_url: str, fallback_dt: datetime | None = None) -> dict:
@@ -1094,7 +1065,7 @@ def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tup
 
 
 # ==============================================================================
-# 8. मुख्य निष्पादन चक्र (DIRECT PORTAL + SMART FALLBACK)
+# 8. मुख्य निष्पादन चक्र
 # ==============================================================================
 def fetch_portal_candidates(portal_info: dict) -> list[dict]:
     candidates = []
@@ -1158,13 +1129,13 @@ def fetch_portal_candidates(portal_info: dict) -> list[dict]:
 
 
 def run_writer_pipeline() -> None:
-    run_started_dt = now_ist_dt()
+    boot_now_dt = now_ist_dt()
     init_db()
-    workflow_start_dt = get_or_set_workflow_start_dt(run_started_dt)
+    boot_cutoff_dt, is_first_boot = get_or_lock_boot_time(boot_now_dt)
 
     print("=" * 72)
-    print(f"{CONFIG['site_name']} Content Writer Engine (Direct + Backup Fallback)")
-    print(f"रन समय (IST): {now_ist_str()} | कटऑफ: {workflow_start_dt.strftime('%d-%m-%Y %H:%M IST')} के बाद")
+    print(f"{CONFIG['site_name']} Content Writer Engine (From-Boot-Cutoff Mode)")
+    print(f"रन समय (IST): {now_ist_str()} | बोट कटऑफ: {boot_cutoff_dt.strftime('%d-%m-%Y %H:%M IST')} के बाद")
     print(f"स्टेटस: {CONFIG['wp_post_status']} | न्यूनतम शब्द: {CONFIG['min_words']}")
     print("=" * 72)
 
@@ -1176,11 +1147,17 @@ def run_writer_pipeline() -> None:
         candidates = fetch_portal_candidates(portal)
         print(f"[{idx:02d}/{len(GOVT_PORTALS)}] {portal['short_org']}: {len(candidates)} संभावित अपडेट मिले")
 
+        # पहली बार बोट चालू होते ही उस समय से पहले मौजूद सभी आइटम्स को baseline_snapshot में लॉक करें
+        if is_first_boot:
+            for item in candidates:
+                add_to_baseline_snapshot(item["notice_sig"], item["portal_url"], item["title"], item["target_url"])
+            print(f"   [BASELINE LOCKED] {portal['short_org']}: बोट चालू होने से पहले के {len(candidates)} आइटम्स लॉक किए गए")
+            continue
+
         for item in candidates:
             notice_sig = item["notice_sig"]
             topic_key = item["topic_key"]
             existing = get_article_record(topic_key)
-            already_seen = get_observed_notice(notice_sig) is not None
 
             details = extract_context_details(
                 item["title"],
@@ -1192,11 +1169,9 @@ def run_writer_pipeline() -> None:
             ).hexdigest()
 
             if existing is None:
-                eligible, reason = is_eligible_new_article(details, notice_sig, workflow_start_dt)
-                touch_observed_notice(notice_sig, item["portal_url"], item["title"], item["target_url"])
-
+                eligible, reason = is_arrived_after_boot(details, notice_sig, boot_cutoff_dt)
                 if not eligible:
-                    print(f"   [SKIP] {item['title'][:50]}... -> {reason}")
+                    print(f"   [SKIP PRE-BOOT] {item['title'][:50]}... -> {reason}")
                     skipped_items += 1
                     continue
 
@@ -1237,14 +1212,9 @@ def run_writer_pipeline() -> None:
                     print(f"   [NEW ARTICLE] [{item['stage']}] ({wc} words) -> {seo_title}")
 
             else:
-                touch_observed_notice(notice_sig, item["portal_url"], item["title"], item["target_url"])
                 stage_changed = existing["stage"] != item["stage"]
                 url_changed = existing["target_url"] != item["target_url"]
                 hash_changed = existing["content_hash"] != content_hash
-
-                if already_seen and not (stage_changed or url_changed or hash_changed):
-                    skipped_items += 1
-                    continue
 
                 if not (stage_changed or url_changed or hash_changed):
                     skipped_items += 1
