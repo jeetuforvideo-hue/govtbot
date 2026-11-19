@@ -25,7 +25,7 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. CONFIGURATION (EXPERIENCED WRITER + EASY ENGLISH TERMS + NO DUPLICATE)
+# 1. CONFIGURATION (HINGLISH/EASY HINDI + ENGLISH HEADINGS + STRICT DEDUP)
 # ==============================================================================
 CONFIG = {
     "site_name": "GovtVibhag",
@@ -51,7 +51,7 @@ HTTP_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf;q=0.8,*/*;q=0.7",
-    "Accept-Language": "en-IN,en;q=0.9,hi-IN;q=0.8,hi;q=0.7",
+    "Accept-Language": "hi-IN,hi;q=0.9,en-IN;q=0.8,en;q=0.7",
 }
 
 
@@ -312,10 +312,14 @@ def detect_stage(text: str) -> str:
 
 
 def build_topic_key(short_org: str, title: str) -> str:
+    """
+    एक ही exam/recruitment/result/admit card के अलग-अलग notice/URL आने पर भी
+    एक ही topic_key बनाता है ताकि 1 article 3 बार न बने।
+    """
     stripped = re.sub(
         r"\b(admit\s*card|hall\s*ticket|call\s*letter|exam\s*city|city\s*intimation|"
         r"answer\s*key|ans\s*key|response\s*sheet|objection|provisional|final|"
-        r"result|results|merit\s*list|scorecard|cut\s*off|cutoff|"
+        r"result|results|merit\s*list|scorecard|cut\s*off|cutoff|out|released|declared|"
         r"notification|recruitment|vacancy|vacancies|apply\s*online|bharti|"
         r"revised|corrigendum|schedule|notice|update|2024|2025|2026|2027)\b",
         " ",
@@ -323,8 +327,8 @@ def build_topic_key(short_org: str, title: str) -> str:
         flags=re.IGNORECASE,
     )
     stripped = re.sub(r"[^a-z0-9]+", " ", stripped)
-    tokens = [t for t in stripped.split() if len(t) > 1][:5]
-    core_slug = "_".join(tokens) if tokens else hashlib.md5(title.encode("utf-8")).hexdigest()[:10]
+    tokens = [t for t in stripped.split() if len(t) > 1][:4]
+    core_slug = "_".join(tokens) if tokens else hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
     raw_id = f"{short_org.lower().strip()}|{core_slug}"
     return hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:16]
 
@@ -511,11 +515,11 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         "pdf_link": target_url if is_pdf_link else "",
         "text_excerpt": "",
         "headings": [],
-        "vacancy_info": "As per official notification",
-        "qualification_info": "As per post-wise official eligibility rules",
-        "age_info": "As per official notification age limit",
-        "fee_info": "As per category & official notification",
-        "dates_info": "As per official schedule",
+        "vacancy_info": "Official notification ke hisab se",
+        "qualification_info": "Post ke hisab se official eligibility dekhein",
+        "age_info": "Official notification ke hisab se age limit",
+        "fee_info": "Category ke hisab se official notice dekhein",
+        "dates_info": "Official schedule ke hisab se",
         "detected_dt": None,
         "has_exact_time": False,
     }
@@ -619,7 +623,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if vac_m:
-        details["vacancy_info"] = f"{vac_m.group(1)} Vacancies (As per official notice)"
+        details["vacancy_info"] = f"{vac_m.group(1)} Vacancies (Official notice ke hisab se)"
 
     age_m = re.search(
         r"(?:age\s+limit|आयु\s+सीमा)[^\n\.]{0,80}?(\d{2})\s*(?:to|\-|से)\s*(\d{2})\s*(?:years|वर्ष|yrs)",
@@ -627,7 +631,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if age_m:
-        details["age_info"] = f"{age_m.group(1)} to {age_m.group(2)} Years (As per rules)"
+        details["age_info"] = f"{age_m.group(1)} se {age_m.group(2)} Years (Rules ke hisab se)"
 
     qual_found = []
     for pat, label in [
@@ -642,7 +646,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         if re.search(pat, extracted_text, flags=re.IGNORECASE):
             qual_found.append(label)
     if qual_found:
-        details["qualification_info"] = ", ".join(qual_found[:3]) + " (Post-wise check)"
+        details["qualification_info"] = ", ".join(qual_found[:3]) + " (Post-wise dekhein)"
 
     fee_m = re.search(
         r"(?:application\s+fee|fee|आवेदन\s+शुल्क)[^\n\.]{0,70}?(?:rs\.?|₹|inr)\s*(\d{1,4})",
@@ -650,7 +654,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if fee_m:
-        details["fee_info"] = f"Rs. {fee_m.group(1)} (Category rules apply)"
+        details["fee_info"] = f"Rs. {fee_m.group(1)} (Category rules dekhein)"
 
     date_list = re.findall(
         r"\b\d{1,2}[./-]\d{1,2}[./-]202[5-7]|\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+202[5-7]",
@@ -668,48 +672,57 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
 
 
 # ==============================================================================
-# 6. EXPERIENCED WRITER ENGINE: ENGLISH TITLE, HEADINGS & EASY ENGLISH TERMS
+# 6. CLEAN TITLE (NO DUPLICATE STAGE/YEAR) + EASY HINDI + ENGLISH HEADINGS
 # ==============================================================================
-def build_english_seo_title(short_org: str, raw_title: str, stage: str) -> str:
+def build_clean_title(short_org: str, raw_title: str, stage: str) -> str:
+    """
+    बिना किसी duplicate शब्द (जैसे Result 2026 ... Result 2026 या Admit Card 2026 ... Admit Card 2026)
+    के साफ़ और सटीक Title बनाता है।
+    """
     yr = current_year_str()
-    ascii_only = re.sub(r"[^\x20-\x7E]+", " ", clean_text(raw_title))
-    ascii_only = re.sub(r"\.pdf$|\.html$|\.aspx$", "", ascii_only, flags=re.IGNORECASE)
-    ascii_only = re.sub(
-        r"\b(click here|download|view|new|latest|notice|notification|update)\b",
-        "",
-        ascii_only,
+    txt = clean_text(raw_title)
+    txt = re.sub(r"\.pdf$|\.html$|\.aspx$", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(
+        r"\b(out|released|declared|new|latest|click here|download|view|notice|notification|update)\b",
+        " ",
+        txt,
         flags=re.IGNORECASE,
     )
-    ascii_only = re.sub(r"\s+", " ", ascii_only).strip(" -–|:")
+
+    stage_clean_patterns = {
+        "Result": r"\b(result|results|merit\s*list|scorecard|score\s*card|cut\s*off|cutoff)\b",
+        "Admit Card": r"\b(admit\s*card|hall\s*ticket|call\s*letter|exam\s*city)\b",
+        "Answer Key": r"\b(answer\s*key|ans\s*key|response\s*sheet|objection)\b",
+        "Jobs": r"\b(recruitment|vacancy|vacancies|apply\s*online|bharti)\b",
+    }
+    pat = stage_clean_patterns.get(stage)
+    if pat:
+        txt = re.sub(pat, " ", txt, flags=re.IGNORECASE)
+
+    txt = re.sub(r"\b202[4-7]\b", " ", txt)
+    txt = re.sub(r"[^\w\s\u0900-\u097f\-/]+", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip(" -–|:/")
 
     words = []
-    for w in ascii_only.split():
-        tok = w.strip("()[]\"',.")
-        if len(tok) >= 2 and tok.lower() not in {"the", "of", "for", "and", "in", "on", "to"}:
-            words.append(tok)
+    for w in txt.split():
+        if w.lower() not in {"the", "of", "for", "and", "in", "on", "to"} and (not words or words[-1].lower() != w.lower()):
+            words.append(w)
 
-    topic_part = " ".join(words[:6]).strip()
-    if not topic_part:
-        topic_part = f"{short_org} Official Update"
+    subject = " ".join(words[:6]).strip()
+    if not subject:
+        subject = short_org
+    elif short_org.lower() not in subject.lower():
+        subject = f"{short_org} {subject}".strip()
 
-    if short_org.lower() not in topic_part.lower():
-        subject = f"{short_org} {topic_part}".strip()
-    else:
-        subject = topic_part
+    subject = subject[:58].strip(" -–|:/")
 
-    deduped = []
-    for w in subject.split():
-        if not deduped or deduped[-1].lower() != w.lower():
-            deduped.append(w)
-    clean_subject = " ".join(deduped)[:70].strip()
-
-    if stage == "Admit Card":
-        return f"{clean_subject} Admit Card {yr}: Download Link, Exam Dates & Guidelines"
-    if stage == "Answer Key":
-        return f"{clean_subject} Answer Key {yr}: Response Sheet, Objection & Marking Guide"
     if stage == "Result":
-        return f"{clean_subject} Result {yr}: Merit List, Scorecard Check & Next Steps"
-    return f"{clean_subject} Recruitment {yr}: Eligibility, Qualification, Dates & How to Apply"
+        return f"{subject} Result {yr}: Merit List, Scorecard aur Check Karne Ka Tarika"
+    if stage == "Admit Card":
+        return f"{subject} Admit Card {yr}: Download Link, Exam Dates aur Guidelines"
+    if stage == "Answer Key":
+        return f"{subject} Answer Key {yr}: Response Sheet, Objection aur Marking Guide"
+    return f"{subject} Recruitment {yr}: Eligibility, Qualification, Dates aur Apply Kaise Karein"
 
 
 def call_gemini_writer(prompt: str) -> str:
@@ -753,7 +766,7 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     )
 
     overview_section = f"""
-<p>Candidates looking for the latest update on <strong>{raw_title}</strong> from <strong>{org}</strong> can check all key details below. Everything is written in simple, practical English with familiar exam terms that today's candidates use every day—without any FAQ block or extra headings.</p>
+<p><strong>{short_org}</strong> ke is <strong>{stage}</strong> update (<strong>{raw_title}</strong>) ki zaroori jaankari neeche aasan bhasha mein di gayi hai. Aajkal ke candidates ke liye kathin Hindi shabdon ke bajay aasan aur familiar terms ka istemal kiya gaya hai, bina kisi FAQ section ke.</p>
 
 <h2>Quick Overview</h2>
 <table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
@@ -774,115 +787,115 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     if stage == "Admit Card":
         body_sections = f"""
 <h2>Exam Schedule &amp; Shift Details</h2>
-<p>Before downloading the <strong>{short_org}</strong> Admit Card, candidates should check their exam date, shift timing, reporting time, and exam center details carefully.</p>
-<p>Reaching the exam center before the reporting time helps avoid gate closure issues, traffic delays, or last-minute stress.</p>
+<p><strong>{short_org}</strong> ka Admit Card download karne se pehle apni exam date, shift timing, reporting time aur exam center ki jaankari dhyan se check kar lein.</p>
+<p>Reporting time se pehle exam center pahunchne se gate band hone ya rush ki dikkat se bacha ja sakta hai.</p>
 
 <h2>Eligibility &amp; Admit Card Checkpoints</h2>
 <ul>
-  <li><strong>Candidate Details Check:</strong> Verify your name, roll number, registration number, category, photo, and signature on the Admit Card.</li>
-  <li><strong>Center &amp; Shift Check:</strong> Match your exam city, test center address, and shift timing with your application form.</li>
-  <li><strong>Fix Mismatches Early:</strong> If any printed detail is unclear or incorrect, check the official instructions on the portal right away.</li>
+  <li><strong>Basic Details Check:</strong> Admit Card par apna naam, roll number, registration number, category, photo aur signature zaroor check karein.</li>
+  <li><strong>Exam Center &amp; Shift:</strong> Apne form ke hisab se exam city, center address aur shift timing mila lein.</li>
+  <li><strong>Correction Alert:</strong> Agar kisi detail mein koi galti ya dhyan dene wali baat dikhe to official notice ke niyam dekhein.</li>
 </ul>
 
 <h2>How to Download Admit Card</h2>
 <ol>
-  <li>Click the Official Website Link in the Quick Overview table above.</li>
-  <li>Open the Admit Card or candidate login link for <strong>{raw_title}</strong>.</li>
-  <li>Enter your registration/application number, date of birth or password, and captcha code.</li>
-  <li>Download the Admit Card PDF and take a clear printout for exam day.</li>
+  <li>Upar Quick Overview table mein diye gaye Official Website Link par click karein.</li>
+  <li><strong>{raw_title}</strong> se juda Admit Card ya candidate login link kholein.</li>
+  <li>Apna registration/application number, date of birth ya password aur captcha code bharein.</li>
+  <li>Admit Card PDF download karein aur exam ke liye clear print nikal lein.</li>
 </ol>
 
 <h2>Exam Day Instructions &amp; Documents</h2>
-<p>Carry a printed copy of your Admit Card along with a valid original photo ID (Aadhaar Card, Voter ID, Driving License, or Passport) and required documents.</p>
-<p>Do not carry mobile phones, smartwatches, notes, or other restricted items inside the exam hall.</p>
+<p>Exam center par Admit Card ka clear print aur ek valid original photo ID (Aadhaar Card, Voter ID, Driving License ya Passport) saath le jaana zaroori hota hai.</p>
+<p>Exam hall ke andar mobile, smartwatch, notes ya mana ki gayi cheezein bilkul na le jayein.</p>
 """
     elif stage == "Answer Key":
         body_sections = f"""
 <h2>Answer Key &amp; Marking Overview</h2>
-<p>This <strong>{short_org}</strong> Answer Key update helps candidates match their responses and estimate their raw score before the Result is declared.</p>
-<p>Always check your question paper set, shift, question ID, and marking scheme before calculating marks.</p>
+<p>Ye <strong>{short_org}</strong> Answer Key update candidates ko apne answers milane aur Result aane se pehle lagbhag score ka andaza lagane mein madad karta hai.</p>
+<p>Score calculate karte waqt apna question set, shift, question ID aur marking scheme zaroor dhyan mein rakhein.</p>
 
 <h2>How to Check Answer Key</h2>
 <ol>
-  <li>Open the Official Website Link or Official PDF/Notice Link from the Quick Overview table.</li>
-  <li>Select the Answer Key or response sheet link for <strong>{raw_title}</strong>.</li>
-  <li>Compare your answers against the official key for your shift or set.</li>
-  <li>Save the Answer Key and response sheet PDF for your record.</li>
+  <li>Quick Overview table mein diye gaye Official Website Link ya Official PDF/Notice Link ko kholein.</li>
+  <li><strong>{raw_title}</strong> se judi Answer Key ya response sheet par click karein.</li>
+  <li>Apni shift ya set ke hisab se official key se apne answers milayein.</li>
+  <li>Aage ke reference ke liye Answer Key aur response sheet save kar lein.</li>
 </ol>
 
 <h2>Objection Process &amp; Timeline</h2>
 <ul>
-  <li><strong>Objection Window:</strong> Check the start and last date if objections/challenges are open on the portal.</li>
-  <li><strong>Follow Official Rules:</strong> Submit any objection with valid details before the deadline ends.</li>
-  <li><strong>Final Answer Key:</strong> Final evaluation is based on the final Answer Key released by the authority.</li>
+  <li><strong>Objection Dates:</strong> Agar kisi question par objection/challenge ka option diya gaya hai, to start aur last date dhyan se dekhein.</li>
+  <li><strong>Official Rules:</strong> Objection dalte waqt official notice mein diye gaye niyam aur time limit ko follow karein.</li>
+  <li><strong>Final Key:</strong> Aakhiri evaluation authority dwara jaari final Answer Key ke hisab se hi hota hai.</li>
 </ul>
 
 <h2>Score Calculation Guidelines</h2>
-<p>Add marks for every right answer and deduct marks for wrong answers if negative marking applies in the exam pattern.</p>
-<p>Keep in mind that normalization or final Merit List cut-offs can change raw score estimates.</p>
+<p>Sahi jawab ke liye nirdharit marks jodein aur negative marking lagu hone par galat jawab ke marks ghata lein.</p>
+<p>Final Result ya Merit List aane par normalization ya cut-off ki wajah se final score alag ho sakta hai.</p>
 """
     elif stage == "Result":
         body_sections = f"""
 <h2>Result &amp; Merit List Highlights</h2>
-<p>Candidates waiting for the <strong>{short_org}</strong> Result can check their selection status using the links provided in the Quick Overview table.</p>
-<p>Check your roll number, registration number, name, and category carefully to see if you are shortlisted for the next round.</p>
+<p><strong>{short_org}</strong> Result ka intezar kar rahe candidates Quick Overview table mein diye gaye links ke zariye apna status check kar sakte hain.</p>
+<p>Merit List ya Scorecard mein apna roll number, registration number, naam aur category dhyan se check karein ki aap next stage ke liye shortlist hue hain ya nahi.</p>
 
 <h2>How to Check Result &amp; Scorecard</h2>
 <ol>
-  <li>Click the Official Website Link or Official Notice Link in the Quick Overview table above.</li>
-  <li>Open the Result, Merit List, or Scorecard link for <strong>{raw_title}</strong>.</li>
-  <li>Search your roll number/name in the PDF or log in with your credentials to view your Scorecard.</li>
-  <li>Download and save your Result/Scorecard copy for future rounds.</li>
+  <li>Quick Overview table mein diye gaye Official Website Link ya Official Notice Link par jayein.</li>
+  <li><strong>{raw_title}</strong> se juda Result, Merit List ya Scorecard link kholein.</li>
+  <li>PDF mein apna roll number/naam search karein ya login karke apna Scorecard dekhein.</li>
+  <li>Aage ki process ke liye Result ya Scorecard ki copy save kar lein.</li>
 </ol>
 
 <h2>Selection Stages &amp; Cut-Off Notes</h2>
 <ul>
-  <li><strong>Next Stage Info:</strong> Check whether this Result is for written exam, skill/typing test, PET/PST, interview, or final selection.</li>
-  <li><strong>Cut-Off &amp; Merit:</strong> Check category-wise cut-off marks and Merit List instructions if published.</li>
-  <li><strong>Official Source Only:</strong> Always confirm your status from the official portal PDF or login dashboard.</li>
+  <li><strong>Next Round Jaankari:</strong> Check karein ki ye Result written exam, skill/typing test, PET/PST, interview ya final selection ke liye hai.</li>
+  <li><strong>Cut-Off &amp; Merit:</strong> Agar category-wise cut-off ya Merit List di gayi hai, to use dhyan se padhein.</li>
+  <li><strong>Official Source:</strong> Status hamesha official portal ki PDF ya login page se hi confirm karein.</li>
 </ul>
 
 <h2>Document Verification &amp; Next Steps</h2>
-<p>Shortlisted candidates should keep original mark sheets, certificates, category/domicile proofs, and ID cards ready for Document Verification.</p>
-<p>Keep tracking the portal for reporting dates and next-round schedules so you do not miss any step.</p>
+<p>Shortlist hone wale candidates ko Document Verification ke liye apni original mark sheets, certificates, category/domicile proofs aur ID cards taiyar rakhne chahiye.</p>
+<p>Agle round ki reporting date aur niyamon ke liye official portal par nazar rakhein.</p>
 """
     else:
         body_sections = f"""
 <h2>Vacancy &amp; Notification Highlights</h2>
-<p>This recruitment update from <strong>{short_org}</strong> covers key details for <strong>{raw_title}</strong>. Read the official notification carefully to check post-wise vacancies, pay/grade details, and rules before applying.</p>
-<p>Since portals often get slow near the last date, checking eligibility early and applying on time is a smart move.</p>
+<p><strong>{short_org}</strong> ke is recruitment update (<strong>{raw_title}</strong>) mein apply karne se pehle official notification ko poori tarah padhna zaroori hai, jisse post details, vacancy aur niyam clear ho sakein.</p>
+<p>Last date ke qareeb official website par traffic badh sakta hai, isliye eligibility check karke samay rehte form bhar lena behtar rehta hai.</p>
 
-<h2>Eligibility Criteria &amp; Age Limit</h2>
-<p>Candidates must meet the age limit and basic eligibility rules as on the cutoff date given in the official notification.</p>
+<h2>Eligibility &amp; Age Limit</h2>
+<p>Candidates ke paas official notification mein di gayi cutoff date tak zaroori age limit aur eligibility honi chahiye.</p>
 <ul>
-  <li><strong>Age Limit:</strong> Current extracted info shows <strong>{details['age_info']}</strong>.</li>
-  <li><strong>Age Relaxation:</strong> Reserved categories get age relaxation as per government and notification rules.</li>
-  <li><strong>Eligibility Rules:</strong> Check post-specific conditions in the official notification before filling out the form.</li>
+  <li><strong>Age Limit:</strong> Filhal mili jaankari ke hisab se <strong>{details['age_info']}</strong>.</li>
+  <li><strong>Age Relaxation:</strong> Reserved categories ko niyamon ke mutabik age relaxation mil sakti hai.</li>
+  <li><strong>Eligibility Rules:</strong> Form bharne se pehle post ke hisab se official notification ki shartein check karein.</li>
 </ul>
 
 <h2>Educational Qualification</h2>
-<p>Applicants should have the required educational qualification on or before the last date mentioned in the notification.</p>
+<p>Apply karne wale candidates ke paas notification mein di gayi last date tak zaroori educational qualification honi chahiye.</p>
 <ul>
-  <li><strong>Qualification Info:</strong> Current extracted info shows <strong>{details['qualification_info']}</strong>.</li>
-  <li><strong>Stream / Trade / Degree:</strong> Check whether 10th, 12th, ITI, Diploma, or Graduation/Degree is required for your post.</li>
+  <li><strong>Qualification Summary:</strong> Filhal mili jaankari ke hisab se <strong>{details['qualification_info']}</strong>.</li>
+  <li><strong>Trade / Stream / Degree:</strong> Check karein ki aapke post ke liye 10th, 12th, ITI, Diploma ya Graduation/Degree mein se kya manga gaya hai.</li>
 </ul>
 
 <h2>Application Fee &amp; Selection Process</h2>
-<p>Check the Application Fee (<strong>{details['fee_info']}</strong>) and review the full Selection Process—such as written exam, skill/physical test, Document Verification, and medical/interview—before submitting your form.</p>
+<p>Application Fee (<strong>{details['fee_info']}</strong>) aur poori Selection Process—jaise written exam, skill/physical test, Document Verification aur medical/interview—ki jaankari form bharne se pehle samajh lein.</p>
 
 <h2>How to Apply Online</h2>
 <ol>
-  <li>Open the Official Website Link or Official PDF/Notice Link in the Quick Overview table above.</li>
-  <li>Complete registration carefully using accurate personal and contact details.</li>
-  <li>Fill out the online form, upload photo/signature/documents as required, and pay the Application Fee.</li>
-  <li>Submit the application and save/print the confirmation page for future reference.</li>
+  <li>Quick Overview table mein diye gaye Official Website Link ya Official PDF/Notice Link ko kholein.</li>
+  <li>Apni sahi personal aur contact details ke saath registration poora karein.</li>
+  <li>Online form bharein, zaroori documents/photo/signature upload karein aur Application Fee jama karein.</li>
+  <li>Form submit karne ke baad final confirmation page ka print ya PDF save kar lein.</li>
 </ol>
 """
 
     extracted_headings_note = ""
     if details.get("headings"):
         items_html = "".join(
-            f"<li><strong>{clean_text(h)}:</strong> Included in the official notice for candidates to review.</li>"
+            f"<li><strong>{clean_text(h)}:</strong> Official notice mein ye hissa candidates ke liye diya gaya hai.</li>"
             for h in details["headings"][:4]
         )
         extracted_headings_note = f"""
@@ -895,11 +908,11 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     writer_tips_section = f"""
 {extracted_headings_note}
 <h2>Important Candidate Tips</h2>
-<p>An experienced applicant takes each step carefully instead of rushing at the last minute.</p>
+<p>Ek samajhdar candidate har step ko aaram se aur dhyan se karta hai taaki aage koi dikkat na aaye.</p>
 <ul>
-  <li><strong>Match All Details:</strong> Keep your name, date of birth, category, and registration details consistent across your form, ID proof, and certificates.</li>
-  <li><strong>Save All PDFs:</strong> Keep copies of the notification, application form, fee receipt, Admit Card, Answer Key, and Result in one folder.</li>
-  <li><strong>Double-Check Before Submit:</strong> Verify spelling, post/center preferences, and uploads before final submission or deadline close.</li>
+  <li><strong>Details Ek Jaisi Rakhein:</strong> Apna naam, date of birth, category aur registration details form, ID aur certificates mein ek jaise rakhein.</li>
+  <li><strong>Documents Safe Rakhein:</strong> Notification PDF, application form, fee receipt, Admit Card, Answer Key aur Result ki copy ek jagah save rakhein.</li>
+  <li><strong>Final Submit Se Pehle Check:</strong> Spelling, post/center choice aur uploaded files submit karne se pehle dobara check karein.</li>
 </ul>
 """
 
@@ -913,18 +926,18 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
     extra_blocks = [
         f"""
 <h2>Practical Preparation &amp; Verification Checklist</h2>
-<p>Candidates applying or tracking updates for <strong>{short_org}</strong> ({raw_title}) do better when they follow a simple step-by-step checklist. Rushing through instructions often causes silly mistakes in form filling, document upload, or exam center reporting.</p>
-<p>Always verify key details from the official notification or notice PDF rather than relying on rumors or unverified forwards.</p>
+<p><strong>{short_org}</strong> ke is update (<strong>{raw_title}</strong>) ko follow karte waqt ek simple checklist rakhna kaafi madad karta hai. Jaldbazi mein form bharne ya details check na karne se aksar chhoti galtiyan ho jati hain.</p>
+<p>Kisi bhi afwah ya forwarded message ke bajay hamesha official notification ya official notice link se hi jaankari confirm karein.</p>
 <ul>
-  <li><strong>Check Rules &amp; Dates:</strong> Confirm qualification, age limit, and important dates before starting.</li>
-  <li><strong>Keep Documents Ready:</strong> Keep required certificates, ID proof, and scanned copies ready in advance.</li>
-  <li><strong>Apply &amp; Check Early:</strong> Avoid waiting until the last hours when server load is high.</li>
+  <li><strong>Dates &amp; Eligibility:</strong> Shuru karne se pehle important dates, qualification aur age limit zaroor check karein.</li>
+  <li><strong>Documents Taiyar Rakhein:</strong> Zaroori certificates, ID proof aur scanned copies pehle se taiyar rakhein.</li>
+  <li><strong>Time Se Kaam Karein:</strong> Aakhiri waqt ka intezar na karein jab website par load zyada ho sakta hai.</li>
 </ul>
 """,
         f"""
 <h2>Step-by-Step Candidate Approach</h2>
-<p>Whether you are checking a new notification, downloading an Admit Card, matching an Answer Key, or viewing a Result for <strong>{org}</strong>, a clear and calm approach helps avoid mistakes.</p>
-<p>Read every relevant point in the official notice carefully, check rules for your category or post, and keep your records safe for upcoming stages.</p>
+<p>Chahe aap nayi recruitment notification dekh rahe hon, Admit Card download kar rahe hon, Answer Key mila rahe hon, ya <strong>{org}</strong> ka Result check kar rahe hon—ek saaf aur aasan tarika galtiyon ko kam karta hai.</p>
+<p>Official notice ke zaroori points ko dhyan se padhein, apni category aur post ke hisab se niyam dekhein, aur apne records aage ke rounds ke liye surakshit rakhein.</p>
 """,
     ]
 
@@ -937,9 +950,9 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
     extra_num = 1
     while count_words_from_html(out_html) < min_words:
         out_html += (
-            f"\n<p><strong>Candidate Note {extra_num}:</strong> For {short_org} ({raw_title}) under {stage}, "
-            f"always confirm all eligibility rules, dates, instructions, and links from the official source "
-            f"and keep copies of your records for future reference.</p>"
+            f"\n<p><strong>Candidate Note {extra_num}:</strong> {short_org} ({raw_title}) ke is {stage} update "
+            f"ke liye hamesha official source se eligibility, dates, instructions aur links confirm karein "
+            f"aur apne zaroori records aage ke liye safe rakhein.</p>"
         )
         extra_num += 1
 
@@ -956,29 +969,29 @@ def build_complete_article(
     stages_history: list | None = None,
 ) -> tuple[str, str, int]:
     short_org = portal_info.get("short_org") or portal_info.get("org") or "Govt"
-    seo_title = build_english_seo_title(short_org, raw_title, stage)
+    seo_title = build_clean_title(short_org, raw_title, stage)
     base_html = build_writer_html(portal_info, raw_title, target_url, stage, details)
 
     if is_live_update and stages_history:
         flow_str = " &rarr; ".join(stages_history)
         update_note = (
-            f"<p><strong>Live Update:</strong> This existing post has been updated for the latest stage "
+            f"<p><strong>Live Update:</strong> Is post ko naye stage ke hisab se update kiya gaya hai "
             f"(<strong>{stage}</strong> | Stage Flow: <strong>{flow_str}</strong>).</p>\n"
         )
         base_html = f"{update_note}{base_html}"
 
     if CONFIG["gemini_api_key"]:
         prompt = f"""
-You are an experienced government jobs & exam content writer writing for today's young Indian candidates.
-Improve and expand the HTML article below so it reads naturally, clearly, and thoroughly with at least {CONFIG['min_words']} words.
+Aap ek experienced government jobs & exam content writer hain jo aajkal ke young candidates ke liye likh rahe hain.
+Neeche diye gaye HTML article ko aur behtar, natural aur helpful banayein taaki ismein kam se kam {CONFIG['min_words']} words hon.
 
 Strict Rules:
-- Write the SEO title mindset, all <h2>/<h3> headings, and the article in clear, natural English using everyday exam terms that today's youth easily understand (such as Admit Card, Answer Key, Result, Vacancy, Eligibility, Qualification, Age Limit, Application Fee, Selection Process, Cut Off, Merit List, Scorecard, Notification, Document Verification) instead of stiff or difficult words.
-- Do NOT include any FAQ section or Q&A blocks.
-- Keep the Quick Overview table at the top with the official website link and official PDF/notice link; do NOT create a separate heading for official website.
-- Structure headings around what a candidate actually needs for stage "{stage}" (such as Eligibility Criteria & Age Limit, Educational Qualification, Application Fee & Selection Process, How to Apply Online / How to Download Admit Card / How to Check Answer Key / How to Check Result, Important Candidate Tips).
-- Return ONLY clean HTML (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>), no markdown ``` fences.
-- Do not invent fake dates, vacancy numbers, or unverified claims; keep "As per official notification" where facts are not stated.
+- Article ko aasan, bolchal ki Hindi (Roman/Devanagari natural mix ya aasan Hindi) mein likhein, lekin mushkil/bhaari Hindi shabdon ke bajay aasan aur rozmarra wale English exam terms (jaise Admit Card, Answer Key, Result, Vacancy, Eligibility, Qualification, Age Limit, Application Fee, Selection Process, Cut Off, Merit List, Scorecard, Notification, Document Verification) use karein.
+- Sabhi <h2>/<h3> headings English mein rakhein (jaise Quick Overview, Eligibility & Age Limit, Educational Qualification, Application Fee & Selection Process, How to Apply Online / How to Download Admit Card / How to Check Answer Key / How to Check Result, Important Candidate Tips).
+- FAQ section ya Q&A bilkul na likhein.
+- Quick Overview table sabse upar rakhein jisme Official Website Link aur Official PDF/Notice Link ho; official website ke liye alag se koi heading na banayein.
+- Sirf clean HTML (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>) dein, markdown ``` bilkul na lagayein.
+- Apni taraf se galat dates, vacancy count ya jhoothi jaankari na jodein.
 
 Title: {seo_title}
 Organization: {portal_info.get('org', short_org)}
@@ -1003,8 +1016,37 @@ Base HTML:
 
 
 # ==============================================================================
-# 7. WORDPRESS PUBLISH & LIVE UPDATE (DRAFT BY DEFAULT)
+# 7. WORDPRESS PUBLISH & STRICT NO-DUPLICATE UPDATE
 # ==============================================================================
+def find_existing_wp_post_by_title(title: str, headers: dict) -> int:
+    """
+    Agar WordPress par pehle se usi topic/title ka draft ya post maujood hai,
+    to naya post create karne ke bajay uska ID dhoondhta hai taaki repeat na ho.
+    """
+    base_slug_part = re.sub(r":.*$", "", title).strip()
+    if not base_slug_part:
+        return 0
+    try:
+        search_url = f"{CONFIG['wp_site_url']}/wp-json/wp/v2/posts"
+        resp = requests.get(
+            search_url,
+            headers=headers,
+            params={"search": base_slug_part, "status": "any", "per_page": 5},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            posts = resp.json() or []
+            norm_target = re.sub(r"\W+", " ", base_slug_part.lower()).strip()
+            for p in posts:
+                existing_title = BeautifulSoup(p.get("title", {}).get("rendered", ""), "html.parser").get_text(" ", strip=True)
+                norm_existing = re.sub(r"\W+", " ", existing_title.lower()).strip()
+                if norm_target and (norm_target in norm_existing or norm_existing in norm_target):
+                    return int(p.get("id") or 0)
+    except Exception:
+        pass
+    return 0
+
+
 def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tuple[bool, int, str]:
     preview_file = os.path.join(CONFIG["cache_dir"], "last_generated_article.html")
     with open(preview_file, "w", encoding="utf-8") as f:
@@ -1022,6 +1064,11 @@ def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tup
         "Content-Type": "application/json",
         "User-Agent": HTTP_HEADERS["User-Agent"],
     }
+
+    if wp_post_id <= 0:
+        found_id = find_existing_wp_post_by_title(title, headers)
+        if found_id > 0:
+            wp_post_id = found_id
 
     status_to_use = CONFIG["wp_post_status"] if CONFIG["wp_post_status"] in ("draft", "publish", "pending", "private") else "draft"
     payload = {"title": title, "content": html_content, "status": status_to_use}
