@@ -1,45 +1,44 @@
-name: GovtVibhag 24/7 Bot
+name: GovtVibhag Auto Content Writer
 
 on:
   schedule:
-    - cron: '*/45 * * * *'
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  run-bot:
+  run-govt-writer:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4 pymupdf
+      - name: Install required libraries
+        run: pip install requests beautifulsoup4 lxml pymupdf
 
-      - name: Run Bot Script
+      - name: Run Content Writer Script
         env:
           WP_SITE_URL: ${{ secrets.WP_SITE_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python gov_vibhaf_master.py
+          WP_POST_STATUS: draft
+          MAX_NOTICE_AGE_HOURS: "2"
+          POST_RUN_ONLY: "true"
+          ENABLE_FALLBACK: "true"
+          MIN_ARTICLE_WORDS: "1050"
+        run: python gov_vibhaf_master.py
 
-      - name: Save Updated Database Safely
+      - name: Save database state to repository
         run: |
-          git config --global user.name "GovtBot Auto"
-          git config --global user.email "bot@govtvibhag.com"
-          git add govt_vibhag_master.db
-          git diff --staged --quiet || (git commit -m "Auto-update database after scan" && git pull --rebase origin main || echo "Rebase skipped" && git push origin main || echo "Push skipped")
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add scraped_data_cache/govtvibhag_latest.db || true
+          git diff --staged --quiet || (git commit -m "Update bot database state" && git push)
