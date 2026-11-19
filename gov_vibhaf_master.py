@@ -6,7 +6,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,7 +25,7 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. CONFIGURATION (HINGLISH/EASY HINDI + ENGLISH HEADINGS + STRICT DEDUP)
+# 1. CONFIGURATION (DEVANAGARI HINDI + EASY ENGLISH TERMS + STRICT DEDUP)
 # ==============================================================================
 CONFIG = {
     "site_name": "GovtVibhag",
@@ -266,6 +266,30 @@ def get_article_record(topic_key: str) -> dict | None:
     }
 
 
+def get_article_by_org_and_stage(short_org: str, stage: str) -> dict | None:
+    conn = sqlite3.connect(CONFIG["db_path"])
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT topic_key, portal_url, short_org, raw_title, seo_title, stage,
+                  stages_history, target_url, content_hash, word_count, wp_post_id,
+                  created_at, updated_at
+           FROM articles WHERE lower(short_org) = lower(?) AND lower(stage) = lower(?)
+           ORDER BY rowid DESC LIMIT 1""",
+        (short_org, stage),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "topic_key": row[0], "portal_url": row[1], "short_org": row[2],
+        "raw_title": row[3], "seo_title": row[4], "stage": row[5],
+        "stages_history": json.loads(row[6] or "[]"), "target_url": row[7],
+        "content_hash": row[8], "word_count": row[9], "wp_post_id": row[10],
+        "created_at": row[11], "updated_at": row[12],
+    }
+
+
 def upsert_article_record(record: dict) -> None:
     conn = sqlite3.connect(CONFIG["db_path"])
     cur = conn.cursor()
@@ -313,7 +337,7 @@ def detect_stage(text: str) -> str:
 
 def build_topic_key(short_org: str, title: str) -> str:
     """
-    एक ही exam/recruitment/result/admit card के अलग-अलग notice/URL आने पर भी
+    एक ही exam/recruitment/result/admit card के अलग-अलग notice या link आने पर भी
     एक ही topic_key बनाता है ताकि 1 article 3 बार न बने।
     """
     stripped = re.sub(
@@ -321,13 +345,14 @@ def build_topic_key(short_org: str, title: str) -> str:
         r"answer\s*key|ans\s*key|response\s*sheet|objection|provisional|final|"
         r"result|results|merit\s*list|scorecard|cut\s*off|cutoff|out|released|declared|"
         r"notification|recruitment|vacancy|vacancies|apply\s*online|bharti|"
-        r"revised|corrigendum|schedule|notice|update|2024|2025|2026|2027)\b",
+        r"revised|corrigendum|schedule|notice|update|check|direct|link|paper|raise|"
+        r"2024|2025|2026|2027)\b",
         " ",
         (title or "").lower(),
         flags=re.IGNORECASE,
     )
     stripped = re.sub(r"[^a-z0-9]+", " ", stripped)
-    tokens = [t for t in stripped.split() if len(t) > 1][:4]
+    tokens = [t for t in stripped.split() if len(t) > 1][:3]
     core_slug = "_".join(tokens) if tokens else hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
     raw_id = f"{short_org.lower().strip()}|{core_slug}"
     return hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:16]
@@ -356,6 +381,30 @@ def is_valid_notice_candidate(title: str, full_url: str) -> bool:
     return any(w in low_t or w in low_u for w in all_stage_words) or (".pdf" in low_u)
 
 
+def is_third_party_or_news_url(url: str, portal_url: str) -> bool:
+    """
+    Google News या किसी third-party/news/redirect URL को official notice/PDF के रूप में
+    स्वीकार नहीं करता।
+    """
+    if not url:
+        return True
+    parsed_u = urlparse(url)
+    host_u = (parsed_u.netloc or "").lower()
+    if not host_u:
+        return True
+    blocked_hosts = (
+        "news.google.com", "google.com", "facebook.com", "instagram.com",
+        "t.me", "telegram.me", "youtube.com", "youtu.be", "bit.ly", "x.com", "twitter.com"
+    )
+    if any(bh in host_u for bh in blocked_hosts):
+        return True
+    parsed_p = urlparse(portal_url)
+    base_domain = (parsed_p.netloc or "").lower().replace("www.", "")
+    if base_domain and base_domain not in host_u and not host_u.endswith((".gov.in", ".nic.in", ".ac.in", ".org.in")):
+        return True
+    return False
+
+
 # ==============================================================================
 # 5. HTTP FETCH, FALLBACK, BOOT CUTOFF & CONTEXT EXTRACTION
 # ==============================================================================
@@ -382,7 +431,7 @@ def fetch_fallback_updates(portal_info: dict) -> list[dict]:
     short_org = portal_info["short_org"]
     portal_url = portal_info["url"]
     query = f'"{short_org}" (recruitment OR vacancy OR result OR "admit card" OR "answer key" OR notification) when:1d'
-    rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+    rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=hi-IN&gl=IN&ceid=IN:hi"
 
     resp = fetch_url_flexible(rss_url)
     if resp is None:
@@ -392,15 +441,13 @@ def fetch_fallback_updates(portal_info: dict) -> list[dict]:
         soup = BeautifulSoup(resp.text, "xml")
         for entry in soup.find_all("item")[: CONFIG["max_items_per_portal"]]:
             title_el = entry.find("title")
-            link_el = entry.find("link")
             pub_el = entry.find("pubDate")
 
             raw_title = clean_text(title_el.text if title_el else "")
             if " - " in raw_title:
                 raw_title = raw_title.rsplit(" - ", 1)[0].strip()
 
-            link_val = clean_text(link_el.text if link_el else "") or portal_url
-            if not is_valid_notice_candidate(raw_title, link_val):
+            if not is_valid_notice_candidate(raw_title, portal_url):
                 continue
 
             pub_dt = None
@@ -415,15 +462,17 @@ def fetch_fallback_updates(portal_info: dict) -> list[dict]:
                 except Exception:
                     pub_dt = None
 
-            stage = detect_stage(f"{raw_title} {link_val}")
+            stage = detect_stage(raw_title)
             topic_key = build_topic_key(short_org, raw_title)
-            notice_sig = build_notice_signature(short_org, raw_title, link_val)
+            notice_sig = build_notice_signature(short_org, raw_title, portal_url)
 
+            # Fallback से आए आइटम के लिए target_url को third-party news link के बजाय
+            # केवल official portal_url रखते हैं (कोई fake/third-party notice link नहीं)।
             results.append({
                 "notice_sig": notice_sig, "topic_key": topic_key,
                 "portal_url": portal_url, "org": portal_info["org"],
                 "short_org": short_org, "title": raw_title,
-                "target_url": link_val, "stage": stage, "fallback_dt": pub_dt,
+                "target_url": portal_url, "stage": stage, "fallback_dt": pub_dt,
             })
     except Exception:
         pass
@@ -508,23 +557,25 @@ def is_arrived_after_boot(details: dict, notice_sig: str, boot_cutoff_dt: dateti
     return True, "Arrived after bot boot"
 
 
-def extract_context_details(raw_title: str, target_url: str, fallback_dt: datetime | None = None) -> dict:
-    is_pdf_link = target_url.lower().endswith(".pdf")
+def extract_context_details(raw_title: str, target_url: str, portal_url: str, fallback_dt: datetime | None = None) -> dict:
+    has_official_notice = not is_third_party_or_news_url(target_url, portal_url) and (target_url.rstrip("/") != portal_url.rstrip("/"))
+    is_pdf_link = has_official_notice and target_url.lower().endswith(".pdf")
+
     details = {
-        "doc_type": "Official PDF" if is_pdf_link else "Official Notice Link",
-        "pdf_link": target_url if is_pdf_link else "",
+        "doc_type": "Official PDF" if is_pdf_link else ("Official Notice" if has_official_notice else "Official Portal"),
+        "official_notice_link": target_url if has_official_notice else "",
         "text_excerpt": "",
         "headings": [],
-        "vacancy_info": "Official notification ke hisab se",
-        "qualification_info": "Post ke hisab se official eligibility dekhein",
-        "age_info": "Official notification ke hisab se age limit",
-        "fee_info": "Category ke hisab se official notice dekhein",
-        "dates_info": "Official schedule ke hisab se",
+        "vacancy_info": "Official Notification के अनुसार",
+        "qualification_info": "Post के अनुसार Eligibility देखें",
+        "age_info": "Notification के अनुसार Age Limit",
+        "fee_info": "Category के अनुसार Application Fee देखें",
+        "dates_info": "Official Schedule के अनुसार",
         "detected_dt": None,
         "has_exact_time": False,
     }
 
-    resp = fetch_url_flexible(target_url)
+    resp = fetch_url_flexible(target_url) if has_official_notice else None
     http_last_mod_dt = None
     extracted_text = ""
     headings = []
@@ -547,7 +598,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
 
         if is_pdf:
             details["doc_type"] = "Official PDF"
-            details["pdf_link"] = target_url
+            details["official_notice_link"] = target_url
 
         if is_pdf and PYMUPDF_AVAILABLE and len(resp.content or b"") >= 300:
             pdf_tmp = os.path.join(CONFIG["cache_dir"], "inspect_notice.pdf")
@@ -586,13 +637,12 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
             except Exception:
                 pass
         else:
-            details["doc_type"] = "Official Web Notice"
             try:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 for a_tag in soup.find_all("a", href=True):
                     href_full = urljoin(target_url, (a_tag.get("href") or "").strip())
-                    if href_full.lower().endswith(".pdf"):
-                        details["pdf_link"] = href_full
+                    if href_full.lower().endswith(".pdf") and not is_third_party_or_news_url(href_full, portal_url):
+                        details["official_notice_link"] = href_full
                         break
                 for h in soup.find_all(["h1", "h2", "h3", "th"]):
                     ht = clean_text(h.get_text(" ", strip=True))
@@ -623,7 +673,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if vac_m:
-        details["vacancy_info"] = f"{vac_m.group(1)} Vacancies (Official notice ke hisab se)"
+        details["vacancy_info"] = f"{vac_m.group(1)} Vacancies (Official Notification के अनुसार)"
 
     age_m = re.search(
         r"(?:age\s+limit|आयु\s+सीमा)[^\n\.]{0,80}?(\d{2})\s*(?:to|\-|से)\s*(\d{2})\s*(?:years|वर्ष|yrs)",
@@ -631,7 +681,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if age_m:
-        details["age_info"] = f"{age_m.group(1)} se {age_m.group(2)} Years (Rules ke hisab se)"
+        details["age_info"] = f"{age_m.group(1)} से {age_m.group(2)} Years (Rules के अनुसार)"
 
     qual_found = []
     for pat, label in [
@@ -646,7 +696,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         if re.search(pat, extracted_text, flags=re.IGNORECASE):
             qual_found.append(label)
     if qual_found:
-        details["qualification_info"] = ", ".join(qual_found[:3]) + " (Post-wise dekhein)"
+        details["qualification_info"] = ", ".join(qual_found[:3]) + " (Post के अनुसार देखें)"
 
     fee_m = re.search(
         r"(?:application\s+fee|fee|आवेदन\s+शुल्क)[^\n\.]{0,70}?(?:rs\.?|₹|inr)\s*(\d{1,4})",
@@ -654,7 +704,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if fee_m:
-        details["fee_info"] = f"Rs. {fee_m.group(1)} (Category rules dekhein)"
+        details["fee_info"] = f"Rs. {fee_m.group(1)} (Category के अनुसार देखें)"
 
     date_list = re.findall(
         r"\b\d{1,2}[./-]\d{1,2}[./-]202[5-7]|\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+202[5-7]",
@@ -672,18 +722,14 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
 
 
 # ==============================================================================
-# 6. CLEAN TITLE (NO DUPLICATE STAGE/YEAR) + EASY HINDI + ENGLISH HEADINGS
+# 6. CLEAN TITLE (NO DUPLICATE STAGE/YEAR) + DEVANAGARI HINDI + ENGLISH TERMS
 # ==============================================================================
 def build_clean_title(short_org: str, raw_title: str, stage: str) -> str:
-    """
-    बिना किसी duplicate शब्द (जैसे Result 2026 ... Result 2026 या Admit Card 2026 ... Admit Card 2026)
-    के साफ़ और सटीक Title बनाता है।
-    """
     yr = current_year_str()
     txt = clean_text(raw_title)
     txt = re.sub(r"\.pdf$|\.html$|\.aspx$", "", txt, flags=re.IGNORECASE)
     txt = re.sub(
-        r"\b(out|released|declared|new|latest|click here|download|view|notice|notification|update)\b",
+        r"\b(out|released|declared|new|latest|click here|download|view|notice|notification|update|check|direct|link|paper|raise)\b",
         " ",
         txt,
         flags=re.IGNORECASE,
@@ -708,21 +754,21 @@ def build_clean_title(short_org: str, raw_title: str, stage: str) -> str:
         if w.lower() not in {"the", "of", "for", "and", "in", "on", "to"} and (not words or words[-1].lower() != w.lower()):
             words.append(w)
 
-    subject = " ".join(words[:6]).strip()
+    subject = " ".join(words[:4]).strip()
     if not subject:
         subject = short_org
     elif short_org.lower() not in subject.lower():
         subject = f"{short_org} {subject}".strip()
 
-    subject = subject[:58].strip(" -–|:/")
+    subject = subject[:48].strip(" -–|:/")
 
     if stage == "Result":
-        return f"{subject} Result {yr}: Merit List, Scorecard aur Check Karne Ka Tarika"
+        return f"{subject} Result {yr}: Merit List, Scorecard और चेक करने का तरीका"
     if stage == "Admit Card":
-        return f"{subject} Admit Card {yr}: Download Link, Exam Dates aur Guidelines"
+        return f"{subject} Admit Card {yr}: Download Link, Exam Dates और जरूरी निर्देश"
     if stage == "Answer Key":
-        return f"{subject} Answer Key {yr}: Response Sheet, Objection aur Marking Guide"
-    return f"{subject} Recruitment {yr}: Eligibility, Qualification, Dates aur Apply Kaise Karein"
+        return f"{subject} Answer Key {yr}: Response Sheet, Objection और मार्किंग गाइड"
+    return f"{subject} Recruitment {yr}: Eligibility, Qualification, Dates और Apply करने का तरीका"
 
 
 def call_gemini_writer(prompt: str) -> str:
@@ -745,19 +791,19 @@ def call_gemini_writer(prompt: str) -> str:
     return ""
 
 
-def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage: str, details: dict) -> str:
+def build_writer_html(portal_info: dict, raw_title: str, stage: str, details: dict) -> str:
     org = portal_info.get("org") or portal_info.get("short_org") or "Government Organization"
     short_org = portal_info.get("short_org") or org
     portal_url = portal_info.get("portal_url") or portal_info.get("url") or CONFIG["wp_site_url"]
-    pdf_url = details.get("pdf_link") or ""
+    official_notice_url = details.get("official_notice_link") or ""
     updated_now = now_ist_str()
 
-    pdf_row = (
+    # यदि आधिकारिक नोटिस/PDF लिंक मौजूद है तो ही row दिखाएं; वरना कोई सेक्शन या लिंक नहीं
+    notice_row = (
         f'<tr><td><strong>Official PDF / Notice Link</strong></td>'
-        f'<td><a href="{pdf_url}" target="_blank" rel="noopener noreferrer">Open Official PDF</a></td></tr>'
-        if pdf_url
-        else f'<tr><td><strong>Official Notice / Link</strong></td>'
-        f'<td><a href="{target_url}" target="_blank" rel="noopener noreferrer">Open Official Notice</a></td></tr>'
+        f'<td><a href="{official_notice_url}" target="_blank" rel="noopener noreferrer">Official Notice खोलें</a></td></tr>'
+        if official_notice_url
+        else ""
     )
 
     website_row = (
@@ -766,7 +812,7 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     )
 
     overview_section = f"""
-<p><strong>{short_org}</strong> ke is <strong>{stage}</strong> update (<strong>{raw_title}</strong>) ki zaroori jaankari neeche aasan bhasha mein di gayi hai. Aajkal ke candidates ke liye kathin Hindi shabdon ke bajay aasan aur familiar terms ka istemal kiya gaya hai, bina kisi FAQ section ke.</p>
+<p><strong>{short_org}</strong> के इस <strong>{stage}</strong> अपडेट (<strong>{raw_title}</strong>) की जरूरी जानकारी नीचे आसान देवनागरी हिंदी में दी गई है। आजकल के उम्मीदवारों के लिए कठिन हिंदी शब्दों के बजाय <strong>Result</strong>, <strong>Admit Card</strong>, <strong>Answer Key</strong>, <strong>Vacancy</strong>, <strong>Eligibility</strong>, <strong>Qualification</strong>, <strong>Age Limit</strong>, <strong>Application Fee</strong> और <strong>Selection Process</strong> जैसे आसान शब्दों का इस्तेमाल किया गया है।</p>
 
 <h2>Quick Overview</h2>
 <table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
@@ -778,7 +824,7 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     <tr><td><strong>Qualification &amp; Age Limit</strong></td><td>{details['qualification_info']} | {details['age_info']}</td></tr>
     <tr><td><strong>Application Fee &amp; Dates</strong></td><td>{details['fee_info']} | Dates: {details['dates_info']}</td></tr>
     {website_row}
-    {pdf_row}
+    {notice_row}
     <tr><td><strong>Last Updated</strong></td><td>{updated_now}</td></tr>
   </tbody>
 </table>
@@ -787,115 +833,115 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     if stage == "Admit Card":
         body_sections = f"""
 <h2>Exam Schedule &amp; Shift Details</h2>
-<p><strong>{short_org}</strong> ka Admit Card download karne se pehle apni exam date, shift timing, reporting time aur exam center ki jaankari dhyan se check kar lein.</p>
-<p>Reporting time se pehle exam center pahunchne se gate band hone ya rush ki dikkat se bacha ja sakta hai.</p>
+<p><strong>{short_org}</strong> का Admit Card डाउनलोड करने से पहले अपनी exam date, shift timing, reporting time और exam center की जानकारी ध्यान से चेक कर लें।</p>
+<p>Reporting time से पहले exam center पहुँचने से gate बंद होने या भीड़भाड़ की परेशानी से बचा जा सकता है।</p>
 
 <h2>Eligibility &amp; Admit Card Checkpoints</h2>
 <ul>
-  <li><strong>Basic Details Check:</strong> Admit Card par apna naam, roll number, registration number, category, photo aur signature zaroor check karein.</li>
-  <li><strong>Exam Center &amp; Shift:</strong> Apne form ke hisab se exam city, center address aur shift timing mila lein.</li>
-  <li><strong>Correction Alert:</strong> Agar kisi detail mein koi galti ya dhyan dene wali baat dikhe to official notice ke niyam dekhein.</li>
+  <li><strong>Basic Details Check:</strong> Admit Card पर अपना नाम, roll number, registration number, category, photo और signature जरूर चेक करें।</li>
+  <li><strong>Exam Center &amp; Shift:</strong> अपने application form के अनुसार exam city, center address और shift timing मिला लें।</li>
+  <li><strong>Correction Alert:</strong> यदि किसी विवरण में कोई गड़बड़ी या ध्यान देने वाली बात दिखे तो official notice के नियम देखें।</li>
 </ul>
 
 <h2>How to Download Admit Card</h2>
 <ol>
-  <li>Upar Quick Overview table mein diye gaye Official Website Link par click karein.</li>
-  <li><strong>{raw_title}</strong> se juda Admit Card ya candidate login link kholein.</li>
-  <li>Apna registration/application number, date of birth ya password aur captcha code bharein.</li>
-  <li>Admit Card PDF download karein aur exam ke liye clear print nikal lein.</li>
+  <li>ऊपर Quick Overview टेबल में दिए गए Official Website Link पर क्लिक करें।</li>
+  <li><strong>{raw_title}</strong> से जुड़ा Admit Card या candidate login लिंक खोलें।</li>
+  <li>अपना registration/application number, date of birth या password और captcha code भरें।</li>
+  <li>Admit Card PDF डाउनलोड करें और exam के लिए साफ प्रिंट निकाल लें।</li>
 </ol>
 
 <h2>Exam Day Instructions &amp; Documents</h2>
-<p>Exam center par Admit Card ka clear print aur ek valid original photo ID (Aadhaar Card, Voter ID, Driving License ya Passport) saath le jaana zaroori hota hai.</p>
-<p>Exam hall ke andar mobile, smartwatch, notes ya mana ki gayi cheezein bilkul na le jayein.</p>
+<p>Exam center पर Admit Card का साफ प्रिंट और एक valid original photo ID (Aadhaar Card, Voter ID, Driving License या Passport) साथ ले जाना जरूरी होता है।</p>
+<p>Exam hall के अंदर mobile, smartwatch, notes या प्रतिबंधित सामान बिल्कुल न ले जाएं।</p>
 """
     elif stage == "Answer Key":
         body_sections = f"""
 <h2>Answer Key &amp; Marking Overview</h2>
-<p>Ye <strong>{short_org}</strong> Answer Key update candidates ko apne answers milane aur Result aane se pehle lagbhag score ka andaza lagane mein madad karta hai.</p>
-<p>Score calculate karte waqt apna question set, shift, question ID aur marking scheme zaroor dhyan mein rakhein.</p>
+<p>यह <strong>{short_org}</strong> Answer Key अपडेट उम्मीदवारों को अपने जवाब मिलाने और Result आने से पहले संभावित score का अंदाजा लगाने में मदद करता है।</p>
+<p>Score गिनते समय अपना question set, shift, question ID और marking scheme जरूर ध्यान में रखें।</p>
 
 <h2>How to Check Answer Key</h2>
 <ol>
-  <li>Quick Overview table mein diye gaye Official Website Link ya Official PDF/Notice Link ko kholein.</li>
-  <li><strong>{raw_title}</strong> se judi Answer Key ya response sheet par click karein.</li>
-  <li>Apni shift ya set ke hisab se official key se apne answers milayein.</li>
-  <li>Aage ke reference ke liye Answer Key aur response sheet save kar lein.</li>
+  <li>Quick Overview टेबल में दिए गए Official Website Link को खोलें।</li>
+  <li><strong>{raw_title}</strong> से जुड़ी Answer Key या response sheet पर क्लिक करें।</li>
+  <li>अपनी shift या set के अनुसार official key से अपने जवाब मिलाएं।</li>
+  <li>आगे के संदर्भ के लिए Answer Key और response sheet सेव कर लें।</li>
 </ol>
 
 <h2>Objection Process &amp; Timeline</h2>
 <ul>
-  <li><strong>Objection Dates:</strong> Agar kisi question par objection/challenge ka option diya gaya hai, to start aur last date dhyan se dekhein.</li>
-  <li><strong>Official Rules:</strong> Objection dalte waqt official notice mein diye gaye niyam aur time limit ko follow karein.</li>
-  <li><strong>Final Key:</strong> Aakhiri evaluation authority dwara jaari final Answer Key ke hisab se hi hota hai.</li>
+  <li><strong>Objection Dates:</strong> यदि किसी प्रश्न पर objection/challenge का विकल्प दिया गया है, तो शुरू और अंतिम तिथि ध्यान से देखें।</li>
+  <li><strong>Official Rules:</strong> Objection दर्ज करते समय official notice में दिए गए नियम और समय सीमा का पालन करें।</li>
+  <li><strong>Final Key:</strong> अंतिम मूल्यांकन authority द्वारा जारी final Answer Key के आधार पर ही होता है।</li>
 </ul>
 
 <h2>Score Calculation Guidelines</h2>
-<p>Sahi jawab ke liye nirdharit marks jodein aur negative marking lagu hone par galat jawab ke marks ghata lein.</p>
-<p>Final Result ya Merit List aane par normalization ya cut-off ki wajah se final score alag ho sakta hai.</p>
+<p>सही उत्तर के लिए तय marks जोड़ें और negative marking लागू होने पर गलत उत्तर के marks घटा लें।</p>
+<p>Final Result या Merit List जारी होने पर normalization या cut-off के कारण अंतिम score अलग हो सकता है।</p>
 """
     elif stage == "Result":
         body_sections = f"""
 <h2>Result &amp; Merit List Highlights</h2>
-<p><strong>{short_org}</strong> Result ka intezar kar rahe candidates Quick Overview table mein diye gaye links ke zariye apna status check kar sakte hain.</p>
-<p>Merit List ya Scorecard mein apna roll number, registration number, naam aur category dhyan se check karein ki aap next stage ke liye shortlist hue hain ya nahi.</p>
+<p><strong>{short_org}</strong> Result का इंतजार कर रहे उम्मीदवार Quick Overview टेबल में दिए गए लिंक के जरिए अपनी स्थिति चेक कर सकते हैं।</p>
+<p>Merit List या Scorecard में अपना roll number, registration number, नाम और category ध्यान से चेक करें कि आप next stage के लिए shortlist हुए हैं या नहीं।</p>
 
 <h2>How to Check Result &amp; Scorecard</h2>
 <ol>
-  <li>Quick Overview table mein diye gaye Official Website Link ya Official Notice Link par jayein.</li>
-  <li><strong>{raw_title}</strong> se juda Result, Merit List ya Scorecard link kholein.</li>
-  <li>PDF mein apna roll number/naam search karein ya login karke apna Scorecard dekhein.</li>
-  <li>Aage ki process ke liye Result ya Scorecard ki copy save kar lein.</li>
+  <li>Quick Overview टेबल में दिए गए Official Website Link पर जाएं।</li>
+  <li><strong>{raw_title}</strong> से जुड़ा Result, Merit List या Scorecard लिंक खोलें।</li>
+  <li>PDF में अपना roll number/नाम खोजें या login करके अपना Scorecard देखें।</li>
+  <li>आगे की प्रक्रिया के लिए Result या Scorecard की प्रति सेव कर लें।</li>
 </ol>
 
 <h2>Selection Stages &amp; Cut-Off Notes</h2>
 <ul>
-  <li><strong>Next Round Jaankari:</strong> Check karein ki ye Result written exam, skill/typing test, PET/PST, interview ya final selection ke liye hai.</li>
-  <li><strong>Cut-Off &amp; Merit:</strong> Agar category-wise cut-off ya Merit List di gayi hai, to use dhyan se padhein.</li>
-  <li><strong>Official Source:</strong> Status hamesha official portal ki PDF ya login page se hi confirm karein.</li>
+  <li><strong>Next Round जानकारी:</strong> चेक करें कि यह Result written exam, skill/typing test, PET/PST, interview या final selection के लिए है।</li>
+  <li><strong>Cut-Off &amp; Merit:</strong> यदि category-wise cut-off या Merit List दी गई है, तो उसे ध्यान से पढ़ें।</li>
+  <li><strong>Official Source:</strong> स्थिति हमेशा official portal की PDF या login पेज से ही पक्की करें।</li>
 </ul>
 
 <h2>Document Verification &amp; Next Steps</h2>
-<p>Shortlist hone wale candidates ko Document Verification ke liye apni original mark sheets, certificates, category/domicile proofs aur ID cards taiyar rakhne chahiye.</p>
-<p>Agle round ki reporting date aur niyamon ke liye official portal par nazar rakhein.</p>
+<p>Shortlist होने वाले उम्मीदवारों को Document Verification के लिए अपनी original mark sheets, certificates, category/domicile proofs और ID cards तैयार रखने चाहिए।</p>
+<p>अगले राउंड की reporting date और नियमों के लिए official portal पर नजर रखें।</p>
 """
     else:
         body_sections = f"""
 <h2>Vacancy &amp; Notification Highlights</h2>
-<p><strong>{short_org}</strong> ke is recruitment update (<strong>{raw_title}</strong>) mein apply karne se pehle official notification ko poori tarah padhna zaroori hai, jisse post details, vacancy aur niyam clear ho sakein.</p>
-<p>Last date ke qareeb official website par traffic badh sakta hai, isliye eligibility check karke samay rehte form bhar lena behtar rehta hai.</p>
+<p><strong>{short_org}</strong> के इस recruitment अपडेट (<strong>{raw_title}</strong>) में apply करने से पहले official notification को पूरा पढ़ना जरूरी है, जिससे post details, vacancy और नियम साफ हो सकें।</p>
+<p>Last date के नजदीक official website पर traffic बढ़ सकता है, इसलिए eligibility चेक करके समय रहते form भर लेना बेहतर रहता है।</p>
 
 <h2>Eligibility &amp; Age Limit</h2>
-<p>Candidates ke paas official notification mein di gayi cutoff date tak zaroori age limit aur eligibility honi chahiye.</p>
+<p>उम्मीदवारों के पास official notification में दी गई cutoff date तक जरूरी age limit और eligibility होनी चाहिए।</p>
 <ul>
-  <li><strong>Age Limit:</strong> Filhal mili jaankari ke hisab se <strong>{details['age_info']}</strong>.</li>
-  <li><strong>Age Relaxation:</strong> Reserved categories ko niyamon ke mutabik age relaxation mil sakti hai.</li>
-  <li><strong>Eligibility Rules:</strong> Form bharne se pehle post ke hisab se official notification ki shartein check karein.</li>
+  <li><strong>Age Limit:</strong> फिलहाल मिली जानकारी के अनुसार <strong>{details['age_info']}</strong>।</li>
+  <li><strong>Age Relaxation:</strong> Reserved categories को नियमों के मुताबिक age relaxation मिल सकती है।</li>
+  <li><strong>Eligibility Rules:</strong> Form भरने से पहले post के अनुसार official notification की शर्तें चेक करें।</li>
 </ul>
 
 <h2>Educational Qualification</h2>
-<p>Apply karne wale candidates ke paas notification mein di gayi last date tak zaroori educational qualification honi chahiye.</p>
+<p>Apply करने वाले उम्मीदवारों के पास notification में दी गई last date तक जरूरी educational qualification होनी चाहिए।</p>
 <ul>
-  <li><strong>Qualification Summary:</strong> Filhal mili jaankari ke hisab se <strong>{details['qualification_info']}</strong>.</li>
-  <li><strong>Trade / Stream / Degree:</strong> Check karein ki aapke post ke liye 10th, 12th, ITI, Diploma ya Graduation/Degree mein se kya manga gaya hai.</li>
+  <li><strong>Qualification Summary:</strong> फिलहाल मिली जानकारी के अनुसार <strong>{details['qualification_info']}</strong>।</li>
+  <li><strong>Trade / Stream / Degree:</strong> चेक करें कि आपके post के लिए 10th, 12th, ITI, Diploma या Graduation/Degree में से क्या मांगा गया है।</li>
 </ul>
 
 <h2>Application Fee &amp; Selection Process</h2>
-<p>Application Fee (<strong>{details['fee_info']}</strong>) aur poori Selection Process—jaise written exam, skill/physical test, Document Verification aur medical/interview—ki jaankari form bharne se pehle samajh lein.</p>
+<p>Application Fee (<strong>{details['fee_info']}</strong>) और पूरी Selection Process—जैसे written exam, skill/physical test, Document Verification और medical/interview—की जानकारी form भरने से पहले समझ लें।</p>
 
 <h2>How to Apply Online</h2>
 <ol>
-  <li>Quick Overview table mein diye gaye Official Website Link ya Official PDF/Notice Link ko kholein.</li>
-  <li>Apni sahi personal aur contact details ke saath registration poora karein.</li>
-  <li>Online form bharein, zaroori documents/photo/signature upload karein aur Application Fee jama karein.</li>
-  <li>Form submit karne ke baad final confirmation page ka print ya PDF save kar lein.</li>
+  <li>Quick Overview टेबल में दिए गए Official Website Link को खोलें।</li>
+  <li>अपनी सही personal और contact details के साथ registration पूरा करें।</li>
+  <li>Online form भरें, जरूरी documents/photo/signature upload करें और Application Fee जमा करें।</li>
+  <li>Form submit करने के बाद final confirmation page का प्रिंट या PDF सेव कर लें।</li>
 </ol>
 """
 
     extracted_headings_note = ""
     if details.get("headings"):
         items_html = "".join(
-            f"<li><strong>{clean_text(h)}:</strong> Official notice mein ye hissa candidates ke liye diya gaya hai.</li>"
+            f"<li><strong>{clean_text(h)}:</strong> Official notice में यह हिस्सा उम्मीदवारों के लिए दिया गया है।</li>"
             for h in details["headings"][:4]
         )
         extracted_headings_note = f"""
@@ -908,11 +954,11 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     writer_tips_section = f"""
 {extracted_headings_note}
 <h2>Important Candidate Tips</h2>
-<p>Ek samajhdar candidate har step ko aaram se aur dhyan se karta hai taaki aage koi dikkat na aaye.</p>
+<p>एक अनुभवी उम्मीदवार हर step को आराम से और ध्यान से करता है ताकि आगे कोई परेशानी न आए।</p>
 <ul>
-  <li><strong>Details Ek Jaisi Rakhein:</strong> Apna naam, date of birth, category aur registration details form, ID aur certificates mein ek jaise rakhein.</li>
-  <li><strong>Documents Safe Rakhein:</strong> Notification PDF, application form, fee receipt, Admit Card, Answer Key aur Result ki copy ek jagah save rakhein.</li>
-  <li><strong>Final Submit Se Pehle Check:</strong> Spelling, post/center choice aur uploaded files submit karne se pehle dobara check karein.</li>
+  <li><strong>Details एक जैसी रखें:</strong> अपना नाम, date of birth, category और registration details form, ID और certificates में एक जैसे रखें।</li>
+  <li><strong>Documents सुरक्षित रखें:</strong> Notification PDF, application form, fee receipt, Admit Card, Answer Key और Result की प्रति एक जगह सेव रखें।</li>
+  <li><strong>Final Submit से पहले चेक:</strong> Spelling, post/center choice और uploaded files submit करने से पहले दोबारा चेक करें।</li>
 </ul>
 """
 
@@ -926,18 +972,18 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
     extra_blocks = [
         f"""
 <h2>Practical Preparation &amp; Verification Checklist</h2>
-<p><strong>{short_org}</strong> ke is update (<strong>{raw_title}</strong>) ko follow karte waqt ek simple checklist rakhna kaafi madad karta hai. Jaldbazi mein form bharne ya details check na karne se aksar chhoti galtiyan ho jati hain.</p>
-<p>Kisi bhi afwah ya forwarded message ke bajay hamesha official notification ya official notice link se hi jaankari confirm karein.</p>
+<p><strong>{short_org}</strong> के इस अपडेट (<strong>{raw_title}</strong>) को फॉलो करते समय एक आसान checklist रखना काफी मदद करता है। जल्दबाजी में form भरने या details चेक न करने से अक्सर छोटी गलतियां हो जाती हैं।</p>
+<p>किसी भी अफवाह या forwarded मैसेज के बजाय हमेशा official notification या official website लिंक से ही जानकारी पक्की करें।</p>
 <ul>
-  <li><strong>Dates &amp; Eligibility:</strong> Shuru karne se pehle important dates, qualification aur age limit zaroor check karein.</li>
-  <li><strong>Documents Taiyar Rakhein:</strong> Zaroori certificates, ID proof aur scanned copies pehle se taiyar rakhein.</li>
-  <li><strong>Time Se Kaam Karein:</strong> Aakhiri waqt ka intezar na karein jab website par load zyada ho sakta hai.</li>
+  <li><strong>Dates &amp; Eligibility:</strong> शुरू करने से पहले important dates, qualification और age limit जरूर चेक करें।</li>
+  <li><strong>Documents तैयार रखें:</strong> जरूरी certificates, ID proof और scanned copies पहले से तैयार रखें।</li>
+  <li><strong>समय से काम करें:</strong> आखिरी वक्त का इंतजार न करें जब website पर load ज्यादा हो सकता है।</li>
 </ul>
 """,
         f"""
 <h2>Step-by-Step Candidate Approach</h2>
-<p>Chahe aap nayi recruitment notification dekh rahe hon, Admit Card download kar rahe hon, Answer Key mila rahe hon, ya <strong>{org}</strong> ka Result check kar rahe hon—ek saaf aur aasan tarika galtiyon ko kam karta hai.</p>
-<p>Official notice ke zaroori points ko dhyan se padhein, apni category aur post ke hisab se niyam dekhein, aur apne records aage ke rounds ke liye surakshit rakhein.</p>
+<p>चाहे आप नई recruitment notification देख रहे हों, Admit Card डाउनलोड कर रहे हों, Answer Key मिला रहे हों, या <strong>{org}</strong> का Result चेक कर रहे हों—एक साफ और आसान तरीका गलतियों को कम करता है।</p>
+<p>Official notice के जरूरी बिंदुओं को ध्यान से पढ़ें, अपनी category और post के अनुसार नियम देखें, और अपने records आगे के rounds के लिए सुरक्षित रखें।</p>
 """,
     ]
 
@@ -950,9 +996,9 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
     extra_num = 1
     while count_words_from_html(out_html) < min_words:
         out_html += (
-            f"\n<p><strong>Candidate Note {extra_num}:</strong> {short_org} ({raw_title}) ke is {stage} update "
-            f"ke liye hamesha official source se eligibility, dates, instructions aur links confirm karein "
-            f"aur apne zaroori records aage ke liye safe rakhein.</p>"
+            f"\n<p><strong>Candidate Note {extra_num}:</strong> {short_org} ({raw_title}) के इस {stage} अपडेट "
+            f"के लिए हमेशा official source से eligibility, dates, instructions और लिंक पक्के करें "
+            f"और अपने जरूरी records आगे के लिए सुरक्षित रखें।</p>"
         )
         extra_num += 1
 
@@ -962,7 +1008,6 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
 def build_complete_article(
     portal_info: dict,
     raw_title: str,
-    target_url: str,
     stage: str,
     details: dict,
     is_live_update: bool = False,
@@ -970,28 +1015,28 @@ def build_complete_article(
 ) -> tuple[str, str, int]:
     short_org = portal_info.get("short_org") or portal_info.get("org") or "Govt"
     seo_title = build_clean_title(short_org, raw_title, stage)
-    base_html = build_writer_html(portal_info, raw_title, target_url, stage, details)
+    base_html = build_writer_html(portal_info, raw_title, stage, details)
 
     if is_live_update and stages_history:
         flow_str = " &rarr; ".join(stages_history)
         update_note = (
-            f"<p><strong>Live Update:</strong> Is post ko naye stage ke hisab se update kiya gaya hai "
-            f"(<strong>{stage}</strong> | Stage Flow: <strong>{flow_str}</strong>).</p>\n"
+            f"<p><strong>Live Update:</strong> इस post को नए stage के अनुसार अपडेट किया गया है "
+            f"(<strong>{stage}</strong> | Stage Flow: <strong>{flow_str}</strong>)।</p>\n"
         )
         base_html = f"{update_note}{base_html}"
 
     if CONFIG["gemini_api_key"]:
         prompt = f"""
-Aap ek experienced government jobs & exam content writer hain jo aajkal ke young candidates ke liye likh rahe hain.
-Neeche diye gaye HTML article ko aur behtar, natural aur helpful banayein taaki ismein kam se kam {CONFIG['min_words']} words hon.
+आप एक अनुभवी government jobs और exam content writer हैं जो आजकल के युवा उम्मीदवारों के लिए लेख लिखते हैं।
+नीचे दिए गए HTML लेख को बेहतर, स्पष्ट और स्वाभाविक बनाएं ताकि इसमें कम से कम {CONFIG['min_words']} शब्द हों।
 
-Strict Rules:
-- Article ko aasan, bolchal ki Hindi (Roman/Devanagari natural mix ya aasan Hindi) mein likhein, lekin mushkil/bhaari Hindi shabdon ke bajay aasan aur rozmarra wale English exam terms (jaise Admit Card, Answer Key, Result, Vacancy, Eligibility, Qualification, Age Limit, Application Fee, Selection Process, Cut Off, Merit List, Scorecard, Notification, Document Verification) use karein.
-- Sabhi <h2>/<h3> headings English mein rakhein (jaise Quick Overview, Eligibility & Age Limit, Educational Qualification, Application Fee & Selection Process, How to Apply Online / How to Download Admit Card / How to Check Answer Key / How to Check Result, Important Candidate Tips).
-- FAQ section ya Q&A bilkul na likhein.
-- Quick Overview table sabse upar rakhein jisme Official Website Link aur Official PDF/Notice Link ho; official website ke liye alag se koi heading na banayein.
-- Sirf clean HTML (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>) dein, markdown ``` bilkul na lagayein.
-- Apni taraf se galat dates, vacancy count ya jhoothi jaankari na jodein.
+सख्त नियम:
+- पूरा लेख देवनागरी हिंदी में लिखें (Roman Hinglish में नहीं), लेकिन कठिन संस्कृतनिष्ठ हिंदी शब्दों के बजाय Result, Admit Card, Answer Key, Vacancy, Eligibility, Qualification, Age Limit, Application Fee, Selection Process, Cut Off, Merit List, Scorecard, Notification, Document Verification जैसे आसान और प्रचलित exam terms इस्तेमाल करें।
+- सभी <h2>/<h3> headings English में रखें।
+- FAQ या प्रश्न-उत्तर सेक्शन बिल्कुल न बनाएं।
+- Quick Overview टेबल सबसे ऊपर रखें जिसमें Official Website Link हो (और केवल असली official notice/PDF लिंक हो तो ही उसकी row रखें; third-party या news लिंक न डालें)।
+- केवल शुद्ध HTML (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>) दें, markdown ``` बिल्कुल न लगाएं।
+- अपनी ओर से गलत dates, vacancy संख्या या मनगढ़ंत जानकारी न जोड़ें।
 
 Title: {seo_title}
 Organization: {portal_info.get('org', short_org)}
@@ -1018,36 +1063,32 @@ Base HTML:
 # ==============================================================================
 # 7. WORDPRESS PUBLISH & STRICT NO-DUPLICATE UPDATE
 # ==============================================================================
-def find_existing_wp_post_by_title(title: str, headers: dict) -> int:
+def find_existing_wp_post(short_org: str, stage: str, headers: dict) -> int:
     """
-    Agar WordPress par pehle se usi topic/title ka draft ya post maujood hai,
-    to naya post create karne ke bajay uska ID dhoondhta hai taaki repeat na ho.
+    एक ही organization + stage (जैसे SSC Answer Key या BPSC Result) पर पहले से
+    मौजूद draft/post को ढूंढता है ताकि उसी विषय पर 2-3 अलग posts न बनें।
     """
-    base_slug_part = re.sub(r":.*$", "", title).strip()
-    if not base_slug_part:
-        return 0
+    query_str = f"{short_org} {stage}".strip()
     try:
         search_url = f"{CONFIG['wp_site_url']}/wp-json/wp/v2/posts"
         resp = requests.get(
             search_url,
             headers=headers,
-            params={"search": base_slug_part, "status": "any", "per_page": 5},
+            params={"search": query_str, "status": "any", "per_page": 5},
             timeout=20,
         )
         if resp.status_code == 200:
             posts = resp.json() or []
-            norm_target = re.sub(r"\W+", " ", base_slug_part.lower()).strip()
             for p in posts:
-                existing_title = BeautifulSoup(p.get("title", {}).get("rendered", ""), "html.parser").get_text(" ", strip=True)
-                norm_existing = re.sub(r"\W+", " ", existing_title.lower()).strip()
-                if norm_target and (norm_target in norm_existing or norm_existing in norm_target):
+                existing_title = BeautifulSoup(p.get("title", {}).get("rendered", ""), "html.parser").get_text(" ", strip=True).lower()
+                if short_org.lower() in existing_title and stage.lower() in existing_title:
                     return int(p.get("id") or 0)
     except Exception:
         pass
     return 0
 
 
-def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tuple[bool, int, str]:
+def push_to_wordpress(title: str, html_content: str, short_org: str, stage: str, wp_post_id: int = 0) -> tuple[bool, int, str]:
     preview_file = os.path.join(CONFIG["cache_dir"], "last_generated_article.html")
     with open(preview_file, "w", encoding="utf-8") as f:
         f.write(f"<h1>{title}</h1>\n{html_content}")
@@ -1066,7 +1107,7 @@ def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tup
     }
 
     if wp_post_id <= 0:
-        found_id = find_existing_wp_post_by_title(title, headers)
+        found_id = find_existing_wp_post(short_org, stage, headers)
         if found_id > 0:
             wp_post_id = found_id
 
@@ -1120,15 +1161,16 @@ def fetch_portal_candidates(portal_info: dict) -> list[dict]:
                 if not is_valid_notice_candidate(title, full_url):
                     continue
 
+                clean_target = "" if is_third_party_or_news_url(full_url, portal_url) else full_url
                 stage = detect_stage(f"{title} {full_url}")
                 topic_key = build_topic_key(short_org, title)
-                notice_sig = build_notice_signature(short_org, title, full_url)
+                notice_sig = build_notice_signature(short_org, title, clean_target or portal_url)
 
                 candidates.append({
                     "notice_sig": notice_sig, "topic_key": topic_key,
                     "portal_url": portal_url, "org": portal_info["org"],
                     "short_org": short_org, "title": title,
-                    "target_url": full_url, "stage": stage, "fallback_dt": None,
+                    "target_url": clean_target, "stage": stage, "fallback_dt": None,
                 })
 
                 if len(candidates) >= CONFIG["max_items_per_portal"]:
@@ -1176,11 +1218,12 @@ def run_writer_pipeline() -> None:
                 skipped_items += 1
                 continue
 
-            existing = get_article_record(topic_key)
+            existing = get_article_record(topic_key) or get_article_by_org_and_stage(item["short_org"], item["stage"])
 
             details = extract_context_details(
                 item["title"],
                 item["target_url"],
+                item["portal_url"],
                 fallback_dt=item.get("fallback_dt"),
             )
             content_hash = hashlib.md5(
@@ -1201,14 +1244,15 @@ def run_writer_pipeline() -> None:
                 seo_title, html_body, wc = build_complete_article(
                     portal_info=item,
                     raw_title=item["title"],
-                    target_url=item["target_url"],
                     stage=item["stage"],
                     details=details,
                     is_live_update=False,
                     stages_history=history,
                 )
 
-                ok, wp_id, _ = push_to_wordpress(seo_title, html_body, wp_post_id=0)
+                ok, wp_id, _ = push_to_wordpress(
+                    seo_title, html_body, item["short_org"], item["stage"], wp_post_id=0
+                )
                 if ok:
                     now_str = now_ist_str()
                     upsert_article_record({
@@ -1243,7 +1287,6 @@ def run_writer_pipeline() -> None:
                 seo_title, html_body, wc = build_complete_article(
                     portal_info=item,
                     raw_title=item["title"],
-                    target_url=item["target_url"],
                     stage=item["stage"],
                     details=details,
                     is_live_update=True,
@@ -1253,12 +1296,14 @@ def run_writer_pipeline() -> None:
                 ok, wp_id, _ = push_to_wordpress(
                     seo_title,
                     html_body,
+                    item["short_org"],
+                    item["stage"],
                     wp_post_id=int(existing.get("wp_post_id") or 0),
                 )
                 if ok:
                     now_str = now_ist_str()
                     upsert_article_record({
-                        "topic_key": topic_key, "portal_url": item["portal_url"],
+                        "topic_key": existing["topic_key"], "portal_url": item["portal_url"],
                         "short_org": item["short_org"], "raw_title": item["title"],
                         "seo_title": seo_title, "stage": item["stage"],
                         "stages_history": history, "target_url": item["target_url"],
@@ -1267,7 +1312,7 @@ def run_writer_pipeline() -> None:
                         "created_at": existing.get("created_at") or now_str,
                         "updated_at": now_str,
                     })
-                    processed_topic_keys_this_run.add(topic_key)
+                    processed_topic_keys_this_run.add(existing["topic_key"])
                     live_updated += 1
                     print(f"   [LIVE UPDATE] [{existing['stage']} -> {item['stage']}] ({wc} words) -> {seo_title}")
 
