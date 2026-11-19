@@ -25,7 +25,7 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. CONFIGURATION (EXPERIENCED WRITER EDITION + STRICT NO-DUPLICATE + DRAFT)
+# 1. CONFIGURATION (EXPERIENCED WRITER + EASY ENGLISH TERMS + NO DUPLICATE)
 # ==============================================================================
 CONFIG = {
     "site_name": "GovtVibhag",
@@ -288,7 +288,7 @@ def upsert_article_record(record: dict) -> None:
 
 
 # ==============================================================================
-# 4. TEXT CLEANING, STAGE & STRICT TOPIC KEY (PREVENT DUPLICATE ARTICLES)
+# 4. TEXT CLEANING, STAGE & STRICT TOPIC KEY
 # ==============================================================================
 def clean_text(text: str) -> str:
     if not text:
@@ -312,11 +312,6 @@ def detect_stage(text: str) -> str:
 
 
 def build_topic_key(short_org: str, title: str) -> str:
-    """
-    एक ही भर्ती/परीक्षा/विषय के लिए हमेशा एक ही topic_key बनाता है
-    (चाहे 'notification', 'admit card', 'answer key', 'result' या साल बदला हो),
-    ताकि एक ही आर्टिकल दोबारा नया बनकर डुप्लीकेट न हो।
-    """
     stripped = re.sub(
         r"\b(admit\s*card|hall\s*ticket|call\s*letter|exam\s*city|city\s*intimation|"
         r"answer\s*key|ans\s*key|response\s*sheet|objection|provisional|final|"
@@ -518,7 +513,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         "headings": [],
         "vacancy_info": "As per official notification",
         "qualification_info": "As per post-wise official eligibility rules",
-        "age_info": "As per official notification age rules",
+        "age_info": "As per official notification age limit",
         "fee_info": "As per category & official notification",
         "dates_info": "As per official schedule",
         "detected_dt": None,
@@ -624,7 +619,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if vac_m:
-        details["vacancy_info"] = f"{vac_m.group(1)} Posts (As per official notice)"
+        details["vacancy_info"] = f"{vac_m.group(1)} Vacancies (As per official notice)"
 
     age_m = re.search(
         r"(?:age\s+limit|आयु\s+सीमा)[^\n\.]{0,80}?(\d{2})\s*(?:to|\-|से)\s*(\d{2})\s*(?:years|वर्ष|yrs)",
@@ -640,8 +635,8 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         (r"\b12th|intermediate|higher\s*secondary\b", "12th Pass"),
         (r"\biti\b", "ITI"),
         (r"\bdiploma\b", "Diploma"),
-        (r"\bgraduate|graduation|bachelor|degree|b\.tech|b\.sc|b\.a|b\.com\b", "Bachelor's Degree"),
-        (r"\bpost\s*graduate|master|m\.sc|m\.a|m\.tech\b", "Master's Degree"),
+        (r"\bgraduate|graduation|bachelor|degree|b\.tech|b\.sc|b\.a|b\.com\b", "Graduation / Degree"),
+        (r"\bpost\s*graduate|master|m\.sc|m\.a|m\.tech\b", "Post Graduation"),
         (r"\bb\.ed|ctet|tet\b", "B.Ed / TET"),
     ]:
         if re.search(pat, extracted_text, flags=re.IGNORECASE):
@@ -673,7 +668,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
 
 
 # ==============================================================================
-# 6. EXPERIENCED WRITER ENGINE: ENGLISH TITLE + CANDIDATE-FOCUSED HEADINGS
+# 6. EXPERIENCED WRITER ENGINE: ENGLISH TITLE, HEADINGS & EASY ENGLISH TERMS
 # ==============================================================================
 def build_english_seo_title(short_org: str, raw_title: str, stage: str) -> str:
     yr = current_year_str()
@@ -758,7 +753,7 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     )
 
     overview_section = f"""
-<p>Candidates tracking updates from <strong>{org}</strong> can review the complete details for <strong>{raw_title}</strong> below. As an experienced writer organizing information the way applicants actually read it, key links, stage details, and practical steps are structured clearly without fluff or FAQs.</p>
+<p>Candidates looking for the latest update on <strong>{raw_title}</strong> from <strong>{org}</strong> can check all key details below. Everything is written in simple, practical English with familiar exam terms that today's candidates use every day—without any FAQ block or extra headings.</p>
 
 <h2>Quick Overview</h2>
 <table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
@@ -766,7 +761,7 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     <tr><td><strong>Organization / Board</strong></td><td>{org} ({short_org})</td></tr>
     <tr><td><strong>Update Stage</strong></td><td><strong>{stage}</strong> ({details['doc_type']})</td></tr>
     <tr><td><strong>Notice / Title</strong></td><td>{raw_title}</td></tr>
-    <tr><td><strong>Vacancy / Post Info</strong></td><td>{details['vacancy_info']}</td></tr>
+    <tr><td><strong>Vacancy Details</strong></td><td>{details['vacancy_info']}</td></tr>
     <tr><td><strong>Qualification &amp; Age Limit</strong></td><td>{details['qualification_info']} | {details['age_info']}</td></tr>
     <tr><td><strong>Application Fee &amp; Dates</strong></td><td>{details['fee_info']} | Dates: {details['dates_info']}</td></tr>
     {website_row}
@@ -779,119 +774,119 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     if stage == "Admit Card":
         body_sections = f"""
 <h2>Exam Schedule &amp; Shift Details</h2>
-<p>Before downloading the <strong>{short_org}</strong> admit card, candidates should carefully check the examination date, shift timing, reporting time, and exam center details mentioned on the hall ticket or official schedule.</p>
-<p>Arriving ahead of the reporting time helps avoid last-minute gate closure issues, traffic delays, or verification queues at the test center.</p>
+<p>Before downloading the <strong>{short_org}</strong> Admit Card, candidates should check their exam date, shift timing, reporting time, and exam center details carefully.</p>
+<p>Reaching the exam center before the reporting time helps avoid gate closure issues, traffic delays, or last-minute stress.</p>
 
 <h2>Eligibility &amp; Admit Card Checkpoints</h2>
 <ul>
-  <li><strong>Candidate Identity Details:</strong> Verify your name, roll number, registration ID, category, photograph, and signature on the admit card.</li>
-  <li><strong>Center &amp; Shift Accuracy:</strong> Match the exam center address, city, and shift timings with your registered application details.</li>
-  <li><strong>Discrepancy Alert:</strong> If any printed detail is unclear or mismatched, refer to the official instructions on the portal promptly.</li>
+  <li><strong>Candidate Details Check:</strong> Verify your name, roll number, registration number, category, photo, and signature on the Admit Card.</li>
+  <li><strong>Center &amp; Shift Check:</strong> Match your exam city, test center address, and shift timing with your application form.</li>
+  <li><strong>Fix Mismatches Early:</strong> If any printed detail is unclear or incorrect, check the official instructions on the portal right away.</li>
 </ul>
 
 <h2>How to Download Admit Card</h2>
 <ol>
-  <li>Open the official website link listed in the Quick Overview table above.</li>
-  <li>Locate the admit card or candidate login section for <strong>{raw_title}</strong>.</li>
-  <li>Enter your registration/application number, date of birth, or password along with the captcha code.</li>
-  <li>Download the admit card PDF and print clear copies for exam day use.</li>
+  <li>Click the Official Website Link in the Quick Overview table above.</li>
+  <li>Open the Admit Card or candidate login link for <strong>{raw_title}</strong>.</li>
+  <li>Enter your registration/application number, date of birth or password, and captcha code.</li>
+  <li>Download the Admit Card PDF and take a clear printout for exam day.</li>
 </ol>
 
 <h2>Exam Day Instructions &amp; Documents</h2>
-<p>Carry a printed copy of the admit card along with a valid original photo identity proof (such as Aadhaar Card, Voter ID, Driving License, or Passport) and any additional items specified in the instructions.</p>
-<p>Avoid carrying prohibited electronic gadgets, notes, or restricted items into the examination hall so your entry and test session proceed smoothly.</p>
+<p>Carry a printed copy of your Admit Card along with a valid original photo ID (Aadhaar Card, Voter ID, Driving License, or Passport) and required documents.</p>
+<p>Do not carry mobile phones, smartwatches, notes, or other restricted items inside the exam hall.</p>
 """
     elif stage == "Answer Key":
         body_sections = f"""
 <h2>Answer Key &amp; Marking Overview</h2>
-<p>This <strong>{short_org}</strong> answer key update helps candidates cross-check their responses and estimate probable scores before official results are compiled.</p>
-<p>Always verify the question paper set, shift code, question ID, and official marking scheme before calculating your expected marks.</p>
+<p>This <strong>{short_org}</strong> Answer Key update helps candidates match their responses and estimate their raw score before the Result is declared.</p>
+<p>Always check your question paper set, shift, question ID, and marking scheme before calculating marks.</p>
 
 <h2>How to Check Answer Key</h2>
 <ol>
-  <li>Visit the official portal or open the official notice/PDF link provided in the Quick Overview table.</li>
-  <li>Open the answer key or response sheet link related to <strong>{raw_title}</strong>.</li>
-  <li>Match your recorded responses with the official key for your specific paper/shift.</li>
-  <li>Save a copy of the answer key and response sheet for personal reference.</li>
+  <li>Open the Official Website Link or Official PDF/Notice Link from the Quick Overview table.</li>
+  <li>Select the Answer Key or response sheet link for <strong>{raw_title}</strong>.</li>
+  <li>Compare your answers against the official key for your shift or set.</li>
+  <li>Save the Answer Key and response sheet PDF for your record.</li>
 </ol>
 
 <h2>Objection Process &amp; Timeline</h2>
 <ul>
-  <li><strong>Check Objection Window:</strong> Note the opening and closing dates if challenges/objections are invited against provisional answers.</li>
-  <li><strong>Supporting Reference:</strong> Follow the exact procedure and fee/rule terms stated in the official notice when raising any objection.</li>
-  <li><strong>Final Key Priority:</strong> Treat the final answer key issued by the authority as conclusive for evaluation.</li>
+  <li><strong>Objection Window:</strong> Check the start and last date if objections/challenges are open on the portal.</li>
+  <li><strong>Follow Official Rules:</strong> Submit any objection with valid details before the deadline ends.</li>
+  <li><strong>Final Answer Key:</strong> Final evaluation is based on the final Answer Key released by the authority.</li>
 </ul>
 
 <h2>Score Calculation Guidelines</h2>
-<p>Count correct answers according to the positive marks per question and apply negative marking deductions wherever applicable under the exam rules.</p>
-<p>Keep in mind that normalized scores or final merit lists may differ slightly from raw estimates once final evaluation is completed.</p>
+<p>Add marks for every right answer and deduct marks for wrong answers if negative marking applies in the exam pattern.</p>
+<p>Keep in mind that normalization or final Merit List cut-offs can change raw score estimates.</p>
 """
     elif stage == "Result":
         body_sections = f"""
-<h2>Result &amp; Merit Highlights</h2>
-<p>Candidates awaiting the outcome for <strong>{short_org}</strong> should verify their status strictly through the official result link or merit PDF listed in the Quick Overview table.</p>
-<p>Check your roll number, registration number, name, and category carefully to confirm whether you have been shortlisted or selected for the next stage.</p>
+<h2>Result &amp; Merit List Highlights</h2>
+<p>Candidates waiting for the <strong>{short_org}</strong> Result can check their selection status using the links provided in the Quick Overview table.</p>
+<p>Check your roll number, registration number, name, and category carefully to see if you are shortlisted for the next round.</p>
 
 <h2>How to Check Result &amp; Scorecard</h2>
 <ol>
-  <li>Open the official portal link or notice link from the Quick Overview table above.</li>
-  <li>Select the result or merit list update corresponding to <strong>{raw_title}</strong>.</li>
-  <li>Search your roll number/name in the merit PDF or log in with credentials to view your scorecard.</li>
-  <li>Download and save the result page or scorecard for future stages.</li>
+  <li>Click the Official Website Link or Official Notice Link in the Quick Overview table above.</li>
+  <li>Open the Result, Merit List, or Scorecard link for <strong>{raw_title}</strong>.</li>
+  <li>Search your roll number/name in the PDF or log in with your credentials to view your Scorecard.</li>
+  <li>Download and save your Result/Scorecard copy for future rounds.</li>
 </ol>
 
 <h2>Selection Stages &amp; Cut-Off Notes</h2>
 <ul>
-  <li><strong>Stage Progression:</strong> Note whether this result covers written exam, skill/trade test, physical test, interview, or final selection.</li>
-  <li><strong>Category &amp; Cut-Offs:</strong> Review category-wise cut-off marks or qualifying criteria if published alongside the result.</li>
-  <li><strong>Official Verification:</strong> Rely only on official portal files rather than forwarded screenshots or unverified messages.</li>
+  <li><strong>Next Stage Info:</strong> Check whether this Result is for written exam, skill/typing test, PET/PST, interview, or final selection.</li>
+  <li><strong>Cut-Off &amp; Merit:</strong> Check category-wise cut-off marks and Merit List instructions if published.</li>
+  <li><strong>Official Source Only:</strong> Always confirm your status from the official portal PDF or login dashboard.</li>
 </ul>
 
 <h2>Document Verification &amp; Next Steps</h2>
-<p>Shortlisted candidates should keep original certificates, mark sheets, category/domicile certificates, and ID proofs organized in advance for verification.</p>
-<p>Follow upcoming instructions on the official portal closely so no deadline or reporting schedule is missed.</p>
+<p>Shortlisted candidates should keep original mark sheets, certificates, category/domicile proofs, and ID cards ready for Document Verification.</p>
+<p>Keep tracking the portal for reporting dates and next-round schedules so you do not miss any step.</p>
 """
     else:
         body_sections = f"""
-<h2>Vacancy &amp; Post Highlights</h2>
-<p>This recruitment update from <strong>{short_org}</strong> provides essential details for applicants looking at <strong>{raw_title}</strong>. Read the official notification carefully to confirm post-wise vacancies, pay/level details, and application rules before starting your form.</p>
-<p>Because portals can slow down close to the deadline, verifying eligibility early and completing registration calmly helps avoid technical hurdles.</p>
+<h2>Vacancy &amp; Notification Highlights</h2>
+<p>This recruitment update from <strong>{short_org}</strong> covers key details for <strong>{raw_title}</strong>. Read the official notification carefully to check post-wise vacancies, pay/grade details, and rules before applying.</p>
+<p>Since portals often get slow near the last date, checking eligibility early and applying on time is a smart move.</p>
 
 <h2>Eligibility Criteria &amp; Age Limit</h2>
-<p>Candidates must meet the prescribed age limit and eligibility conditions as of the reference date specified in the official notification.</p>
+<p>Candidates must meet the age limit and basic eligibility rules as on the cutoff date given in the official notification.</p>
 <ul>
-  <li><strong>Age Bracket:</strong> Current extracted reference indicates <strong>{details['age_info']}</strong>.</li>
-  <li><strong>Age Relaxation:</strong> Reserved categories may be eligible for age relaxation strictly as per government/notification norms.</li>
-  <li><strong>Nationality &amp; Rules:</strong> Confirm citizenship and post-specific conditions in the official notice before applying.</li>
+  <li><strong>Age Limit:</strong> Current extracted info shows <strong>{details['age_info']}</strong>.</li>
+  <li><strong>Age Relaxation:</strong> Reserved categories get age relaxation as per government and notification rules.</li>
+  <li><strong>Eligibility Rules:</strong> Check post-specific conditions in the official notification before filling out the form.</li>
 </ul>
 
 <h2>Educational Qualification</h2>
-<p>Applicants should possess the required educational qualification on or before the closing date mentioned in the recruitment notice.</p>
+<p>Applicants should have the required educational qualification on or before the last date mentioned in the notification.</p>
 <ul>
-  <li><strong>Qualification Summary:</strong> Current extracted reference indicates <strong>{details['qualification_info']}</strong>.</li>
-  <li><strong>Stream / Trade / Degree:</strong> Check whether a specific degree, diploma, ITI trade, or board/university recognition is required for your target post.</li>
+  <li><strong>Qualification Info:</strong> Current extracted info shows <strong>{details['qualification_info']}</strong>.</li>
+  <li><strong>Stream / Trade / Degree:</strong> Check whether 10th, 12th, ITI, Diploma, or Graduation/Degree is required for your post.</li>
 </ul>
 
 <h2>Application Fee &amp; Selection Process</h2>
-<p>Review the fee structure (<strong>{details['fee_info']}</strong>) and understand every stage of the selection process—such as written examination, skill/typing/physical test, document verification, and medical/interview stages—before submitting the application.</p>
+<p>Check the Application Fee (<strong>{details['fee_info']}</strong>) and review the full Selection Process—such as written exam, skill/physical test, Document Verification, and medical/interview—before submitting your form.</p>
 
 <h2>How to Apply Online</h2>
 <ol>
-  <li>Go to the official website link or official notification link provided in the Quick Overview table.</li>
-  <li>Read the instructions thoroughly and complete one-time/fresh registration with accurate personal details.</li>
-  <li>Fill out the online application form, upload required documents/photo/signature in prescribed format, and pay the applicable fee.</li>
-  <li>Submit the form and save/print the final confirmation page for future reference.</li>
+  <li>Open the Official Website Link or Official PDF/Notice Link in the Quick Overview table above.</li>
+  <li>Complete registration carefully using accurate personal and contact details.</li>
+  <li>Fill out the online form, upload photo/signature/documents as required, and pay the Application Fee.</li>
+  <li>Submit the application and save/print the confirmation page for future reference.</li>
 </ol>
 """
 
     extracted_headings_note = ""
     if details.get("headings"):
         items_html = "".join(
-            f"<li><strong>{clean_text(h)}:</strong> Covered in the official notice for candidate review.</li>"
+            f"<li><strong>{clean_text(h)}:</strong> Included in the official notice for candidates to review.</li>"
             for h in details["headings"][:4]
         )
         extracted_headings_note = f"""
-<h2>Key Sections Found in Official Notice</h2>
+<h2>Key Sections in Official Notice</h2>
 <ul>
   {items_html}
 </ul>
@@ -900,11 +895,11 @@ def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage:
     writer_tips_section = f"""
 {extracted_headings_note}
 <h2>Important Candidate Tips</h2>
-<p>An experienced applicant treats every recruitment or exam update as a sequence of verified steps rather than rushing through a single screen.</p>
+<p>An experienced applicant takes each step carefully instead of rushing at the last minute.</p>
 <ul>
-  <li><strong>Keep Details Consistent:</strong> Ensure your name, date of birth, category, and registration details match across your application, ID proof, and certificates.</li>
-  <li><strong>Maintain a Dedicated Folder:</strong> Store PDFs of the notification, application form, fee receipt, admit card, and scorecard in one place.</li>
-  <li><strong>Recheck Before Final Submit:</strong> Double-check spelling, exam center/post preferences, and uploaded files before final submission or deadline closure.</li>
+  <li><strong>Match All Details:</strong> Keep your name, date of birth, category, and registration details consistent across your form, ID proof, and certificates.</li>
+  <li><strong>Save All PDFs:</strong> Keep copies of the notification, application form, fee receipt, Admit Card, Answer Key, and Result in one folder.</li>
+  <li><strong>Double-Check Before Submit:</strong> Verify spelling, post/center preferences, and uploads before final submission or deadline close.</li>
 </ul>
 """
 
@@ -918,18 +913,18 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
     extra_blocks = [
         f"""
 <h2>Practical Preparation &amp; Verification Checklist</h2>
-<p>Candidates applying or tracking updates for <strong>{short_org}</strong> ({raw_title}) benefit from following a clear personal checklist at every stage. Rushing through instructions often leads to avoidable mistakes in form filling, document upload, or exam day reporting.</p>
-<p>Always cross-check key details from the official notification or notice PDF so you rely on verified facts rather than assumptions or secondary rumors.</p>
+<p>Candidates applying or tracking updates for <strong>{short_org}</strong> ({raw_title}) do better when they follow a simple step-by-step checklist. Rushing through instructions often causes silly mistakes in form filling, document upload, or exam center reporting.</p>
+<p>Always verify key details from the official notification or notice PDF rather than relying on rumors or unverified forwards.</p>
 <ul>
-  <li><strong>Eligibility &amp; Dates Check:</strong> Confirm qualifications, age rules, and important dates before starting or acting on any step.</li>
-  <li><strong>Document Readiness:</strong> Keep scanned copies and original certificates ready well ahead of time.</li>
-  <li><strong>Timely Action:</strong> Avoid waiting until the final hours when portal traffic is usually highest.</li>
+  <li><strong>Check Rules &amp; Dates:</strong> Confirm qualification, age limit, and important dates before starting.</li>
+  <li><strong>Keep Documents Ready:</strong> Keep required certificates, ID proof, and scanned copies ready in advance.</li>
+  <li><strong>Apply &amp; Check Early:</strong> Avoid waiting until the last hours when server load is high.</li>
 </ul>
 """,
         f"""
 <h2>Step-by-Step Candidate Approach</h2>
-<p>Whether you are checking a new notification, downloading an admit card, matching an answer key, or viewing a result for <strong>{org}</strong>, a disciplined approach saves time and prevents errors.</p>
-<p>Read each section of the official notice carefully, note any instructions specific to your category or post, and keep copies of every confirmation or download for future reference.</p>
+<p>Whether you are checking a new notification, downloading an Admit Card, matching an Answer Key, or viewing a Result for <strong>{org}</strong>, a clear and calm approach helps avoid mistakes.</p>
+<p>Read every relevant point in the official notice carefully, check rules for your category or post, and keep your records safe for upcoming stages.</p>
 """,
     ]
 
@@ -943,8 +938,8 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
     while count_words_from_html(out_html) < min_words:
         out_html += (
             f"\n<p><strong>Candidate Note {extra_num}:</strong> For {short_org} ({raw_title}) under {stage}, "
-            f"always verify all eligibility conditions, dates, instructions, and official links directly from "
-            f"the official source and retain copies of your records for future reference.</p>"
+            f"always confirm all eligibility rules, dates, instructions, and links from the official source "
+            f"and keep copies of your records for future reference.</p>"
         )
         extra_num += 1
 
@@ -974,14 +969,14 @@ def build_complete_article(
 
     if CONFIG["gemini_api_key"]:
         prompt = f"""
-You are an experienced government jobs & exam content writer writing for an Indian candidate audience.
-Improve and expand the HTML article below so it reads naturally, clearly, and thoroughly for candidates, with at least {CONFIG['min_words']} words.
+You are an experienced government jobs & exam content writer writing for today's young Indian candidates.
+Improve and expand the HTML article below so it reads naturally, clearly, and thoroughly with at least {CONFIG['min_words']} words.
 
 Strict Rules:
-- Write the SEO title mindset, all <h2>/<h3> headings, and the article body in clear, natural English.
+- Write the SEO title mindset, all <h2>/<h3> headings, and the article in clear, natural English using everyday exam terms that today's youth easily understand (such as Admit Card, Answer Key, Result, Vacancy, Eligibility, Qualification, Age Limit, Application Fee, Selection Process, Cut Off, Merit List, Scorecard, Notification, Document Verification) instead of stiff or difficult words.
 - Do NOT include any FAQ section or Q&A blocks.
 - Keep the Quick Overview table at the top with the official website link and official PDF/notice link; do NOT create a separate heading for official website.
-- Structure headings around what a candidate actually needs for stage "{stage}" (such as Eligibility, Qualification, How to Apply, Admit Card/Exam Instructions, Answer Key/Objection, Result/Next Steps, Candidate Tips).
+- Structure headings around what a candidate actually needs for stage "{stage}" (such as Eligibility Criteria & Age Limit, Educational Qualification, Application Fee & Selection Process, How to Apply Online / How to Download Admit Card / How to Check Answer Key / How to Check Result, Important Candidate Tips).
 - Return ONLY clean HTML (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>), no markdown ``` fences.
 - Do not invent fake dates, vacancy numbers, or unverified claims; keep "As per official notification" where facts are not stated.
 
@@ -994,7 +989,12 @@ Base HTML:
 """
         ai_html = call_gemini_writer(prompt)
         if ai_html and count_words_from_html(ai_html) >= 700:
-            ai_html = re.sub(r"<h[23][^>]*>.*?(?:faq|frequently asked questions).*?</h[23]>.*?(?=<h[23]|$)", "", ai_html, flags=re.IGNORECASE | re.DOTALL)
+            ai_html = re.sub(
+                r"<h[23][^>]*>.*?(?:faq|frequently asked questions).*?</h[23]>.*?(?=<h[23]|$)",
+                "",
+                ai_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
             final_html = ensure_minimum_words(ai_html, portal_info, raw_title, stage, CONFIG["min_words"])
             return seo_title, final_html, count_words_from_html(final_html)
 
