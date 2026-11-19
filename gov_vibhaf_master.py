@@ -23,8 +23,9 @@ except ImportError:
     except ImportError:
         PYMUPDF_AVAILABLE = False
 
+
 # ==============================================================================
-# 1. कॉन्फ़िगरेशन (CONFIGURATION)
+# 1. CONFIGURATION (EXPERIENCED WRITER EDITION + STRICT NO-DUPLICATE + DRAFT)
 # ==============================================================================
 CONFIG = {
     "site_name": "GovtVibhag",
@@ -50,11 +51,12 @@ HTTP_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf;q=0.8,*/*;q=0.7",
-    "Accept-Language": "hi-IN,hi;q=0.9,en-IN;q=0.8,en;q=0.7",
+    "Accept-Language": "en-IN,en;q=0.9,hi-IN;q=0.8,hi;q=0.7",
 }
 
+
 # ==============================================================================
-# 2. आधिकारिक सरकारी पोर्टल्स
+# 2. OFFICIAL GOVERNMENT PORTALS
 # ==============================================================================
 GOVT_PORTALS = [
     {"url": "https://ssc.gov.in", "org": "Staff Selection Commission (SSC)", "short_org": "SSC"},
@@ -135,8 +137,9 @@ MONTH_MAP = {
     "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
 
+
 # ==============================================================================
-# 3. समय व डेटाबेस (IST TIME & SQLITE STATE)
+# 3. TIME & SQLITE DATABASE STATE
 # ==============================================================================
 IST_TZ = timezone(timedelta(hours=5, minutes=30))
 
@@ -283,8 +286,9 @@ def upsert_article_record(record: dict) -> None:
     conn.commit()
     conn.close()
 
+
 # ==============================================================================
-# 4. टेक्स्ट सफ़ाई, चरण पहचान व टॉपिक की
+# 4. TEXT CLEANING, STAGE & STRICT TOPIC KEY (PREVENT DUPLICATE ARTICLES)
 # ==============================================================================
 def clean_text(text: str) -> str:
     if not text:
@@ -308,16 +312,23 @@ def detect_stage(text: str) -> str:
 
 
 def build_topic_key(short_org: str, title: str) -> str:
+    """
+    एक ही भर्ती/परीक्षा/विषय के लिए हमेशा एक ही topic_key बनाता है
+    (चाहे 'notification', 'admit card', 'answer key', 'result' या साल बदला हो),
+    ताकि एक ही आर्टिकल दोबारा नया बनकर डुप्लीकेट न हो।
+    """
     stripped = re.sub(
-        r"\b(admit card|hall ticket|call letter|exam city|answer key|ans key|response sheet|"
-        r"result|results|merit list|scorecard|cut off|cutoff|notification|recruitment|"
-        r"vacancy|vacancies|apply online|provisional|final|revised|corrigendum|2024|2025|2026|2027)\b",
+        r"\b(admit\s*card|hall\s*ticket|call\s*letter|exam\s*city|city\s*intimation|"
+        r"answer\s*key|ans\s*key|response\s*sheet|objection|provisional|final|"
+        r"result|results|merit\s*list|scorecard|cut\s*off|cutoff|"
+        r"notification|recruitment|vacancy|vacancies|apply\s*online|bharti|"
+        r"revised|corrigendum|schedule|notice|update|2024|2025|2026|2027)\b",
         " ",
         (title or "").lower(),
         flags=re.IGNORECASE,
     )
-    stripped = re.sub(r"[^a-z0-9\u0900-\u097f]+", " ", stripped)
-    tokens = [t for t in stripped.split() if len(t) > 1][:6]
+    stripped = re.sub(r"[^a-z0-9]+", " ", stripped)
+    tokens = [t for t in stripped.split() if len(t) > 1][:5]
     core_slug = "_".join(tokens) if tokens else hashlib.md5(title.encode("utf-8")).hexdigest()[:10]
     raw_id = f"{short_org.lower().strip()}|{core_slug}"
     return hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:16]
@@ -345,8 +356,9 @@ def is_valid_notice_candidate(title: str, full_url: str) -> bool:
     all_stage_words = [w for words in STAGE_KEYWORDS.values() for w in words]
     return any(w in low_t or w in low_u for w in all_stage_words) or (".pdf" in low_u)
 
+
 # ==============================================================================
-# 5. लचीला HTTP फेचर + फ़ॉलबैक + बोट कटऑफ जांच
+# 5. HTTP FETCH, FALLBACK, BOOT CUTOFF & CONTEXT EXTRACTION
 # ==============================================================================
 def fetch_url_flexible(url: str) -> requests.Response | None:
     try:
@@ -371,7 +383,7 @@ def fetch_fallback_updates(portal_info: dict) -> list[dict]:
     short_org = portal_info["short_org"]
     portal_url = portal_info["url"]
     query = f'"{short_org}" (recruitment OR vacancy OR result OR "admit card" OR "answer key" OR notification) when:1d'
-    rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=hi-IN&gl=IN&ceid=IN:hi"
+    rss_url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
 
     resp = fetch_url_flexible(rss_url)
     if resp is None:
@@ -483,30 +495,32 @@ def extract_timestamp_details(
 
 def is_arrived_after_boot(details: dict, notice_sig: str, boot_cutoff_dt: datetime) -> tuple[bool, str]:
     if is_in_baseline_snapshot(notice_sig):
-        return False, "बोट चालू करने से पहले का डाटा (Baseline में लॉक)"
+        return False, "Pre-boot item locked in baseline"
 
     det_dt = details.get("detected_dt")
     has_exact_time = bool(details.get("has_exact_time"))
 
     if det_dt is not None:
         if has_exact_time and det_dt < boot_cutoff_dt:
-            return False, f"बोट चालू होने ({boot_cutoff_dt.strftime('%d-%m-%Y %H:%M')}) से पहले का अपडेट"
+            return False, f"Released before boot ({boot_cutoff_dt.strftime('%d-%m-%Y %H:%M')})"
         if not has_exact_time and det_dt.date() < boot_cutoff_dt.date():
-            return False, f"बोट चालू होने की तारीख से पहले का नोटिस ({det_dt.strftime('%d-%m-%Y')})"
+            return False, f"Date earlier than boot date ({det_dt.strftime('%d-%m-%Y')})"
 
-    return True, "बोट चालू होने के बाद आया नया अपडेट"
+    return True, "Arrived after bot boot"
 
 
 def extract_context_details(raw_title: str, target_url: str, fallback_dt: datetime | None = None) -> dict:
+    is_pdf_link = target_url.lower().endswith(".pdf")
     details = {
-        "doc_type": "Official Notice Link",
+        "doc_type": "Official PDF" if is_pdf_link else "Official Notice Link",
+        "pdf_link": target_url if is_pdf_link else "",
         "text_excerpt": "",
         "headings": [],
-        "vacancy_info": "आधिकारिक नोटिफिकेशन के अनुसार",
-        "qualification_info": "पद के अनुसार आधिकारिक सूचना में देखें",
-        "age_info": "नोटिफिकेशन के अनुसार निर्धारित आयु सीमा",
-        "fee_info": "श्रेणी व पद के अनुसार आधिकारिक नोटिस देखें",
-        "dates_info": "आधिकारिक सूचना के अनुसार",
+        "vacancy_info": "As per official notification",
+        "qualification_info": "As per post-wise official eligibility rules",
+        "age_info": "As per official notification age rules",
+        "fee_info": "As per category & official notification",
+        "dates_info": "As per official schedule",
         "detected_dt": None,
         "has_exact_time": False,
     }
@@ -530,10 +544,13 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
                 pass
 
         ctype = (resp.headers.get("Content-Type") or "").lower()
-        is_pdf = target_url.lower().endswith(".pdf") or "application/pdf" in ctype or (resp.content or b"").startswith(b"%PDF")
+        is_pdf = is_pdf_link or "application/pdf" in ctype or (resp.content or b"").startswith(b"%PDF")
+
+        if is_pdf:
+            details["doc_type"] = "Official PDF"
+            details["pdf_link"] = target_url
 
         if is_pdf and PYMUPDF_AVAILABLE and len(resp.content or b"") >= 300:
-            details["doc_type"] = "Official PDF"
             pdf_tmp = os.path.join(CONFIG["cache_dir"], "inspect_notice.pdf")
             try:
                 with open(pdf_tmp, "wb") as f:
@@ -573,6 +590,11 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
             details["doc_type"] = "Official Web Notice"
             try:
                 soup = BeautifulSoup(resp.text, "html.parser")
+                for a_tag in soup.find_all("a", href=True):
+                    href_full = urljoin(target_url, (a_tag.get("href") or "").strip())
+                    if href_full.lower().endswith(".pdf"):
+                        details["pdf_link"] = href_full
+                        break
                 for h in soup.find_all(["h1", "h2", "h3", "th"]):
                     ht = clean_text(h.get_text(" ", strip=True))
                     if 6 <= len(ht) <= 75 and ht not in headings:
@@ -602,7 +624,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if vac_m:
-        details["vacancy_info"] = f"{vac_m.group(1)} पद (आधिकारिक नोटिस के अनुसार)"
+        details["vacancy_info"] = f"{vac_m.group(1)} Posts (As per official notice)"
 
     age_m = re.search(
         r"(?:age\s+limit|आयु\s+सीमा)[^\n\.]{0,80}?(\d{2})\s*(?:to|\-|से)\s*(\d{2})\s*(?:years|वर्ष|yrs)",
@@ -610,22 +632,22 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if age_m:
-        details["age_info"] = f"{age_m.group(1)} से {age_m.group(2)} वर्ष (नोटिफिकेशन के नियमानुसार)"
+        details["age_info"] = f"{age_m.group(1)} to {age_m.group(2)} Years (As per rules)"
 
     qual_found = []
     for pat, label in [
-        (r"\b10th|matric|high\s*school\b", "10वीं"),
-        (r"\b12th|intermediate|higher\s*secondary\b", "12वीं"),
+        (r"\b10th|matric|high\s*school\b", "10th Pass"),
+        (r"\b12th|intermediate|higher\s*secondary\b", "12th Pass"),
         (r"\biti\b", "ITI"),
-        (r"\bdiploma\b", "डिप्लोमा"),
-        (r"\bgraduate|graduation|bachelor|degree|b\.tech|b\.sc|b\.a|b\.com\b", "स्नातक"),
-        (r"\bpost\s*graduate|master|m\.sc|m\.a|m\.tech\b", "स्नातकोत्तर"),
+        (r"\bdiploma\b", "Diploma"),
+        (r"\bgraduate|graduation|bachelor|degree|b\.tech|b\.sc|b\.a|b\.com\b", "Bachelor's Degree"),
+        (r"\bpost\s*graduate|master|m\.sc|m\.a|m\.tech\b", "Master's Degree"),
         (r"\bb\.ed|ctet|tet\b", "B.Ed / TET"),
     ]:
         if re.search(pat, extracted_text, flags=re.IGNORECASE):
             qual_found.append(label)
     if qual_found:
-        details["qualification_info"] = ", ".join(qual_found[:3]) + " (पदानुसार नोटिस देखें)"
+        details["qualification_info"] = ", ".join(qual_found[:3]) + " (Post-wise check)"
 
     fee_m = re.search(
         r"(?:application\s+fee|fee|आवेदन\s+शुल्क)[^\n\.]{0,70}?(?:rs\.?|₹|inr)\s*(\d{1,4})",
@@ -633,7 +655,7 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
         flags=re.IGNORECASE,
     )
     if fee_m:
-        details["fee_info"] = f"₹{fee_m.group(1)} (श्रेणीवार छूट व नियम नोटिस में देखें)"
+        details["fee_info"] = f"Rs. {fee_m.group(1)} (Category rules apply)"
 
     date_list = re.findall(
         r"\b\d{1,2}[./-]\d{1,2}[./-]202[5-7]|\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+202[5-7]",
@@ -649,40 +671,50 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
 
     return details
 
+
 # ==============================================================================
-# 6. सर्च-फ्रेंडली SEO टाइटल व प्रोफेशनल 1000+ वर्ड आर्टिकल बिल्डर
+# 6. EXPERIENCED WRITER ENGINE: ENGLISH TITLE + CANDIDATE-FOCUSED HEADINGS
 # ==============================================================================
-def build_search_friendly_title(short_org: str, raw_title: str, stage: str) -> str:
+def build_english_seo_title(short_org: str, raw_title: str, stage: str) -> str:
     yr = current_year_str()
-    cleaned = re.sub(r"\.pdf$|\.html$|\.aspx$", "", clean_text(raw_title), flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(click here|download|view|new|latest|notice|notification)\b", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–|:")
+    ascii_only = re.sub(r"[^\x20-\x7E]+", " ", clean_text(raw_title))
+    ascii_only = re.sub(r"\.pdf$|\.html$|\.aspx$", "", ascii_only, flags=re.IGNORECASE)
+    ascii_only = re.sub(
+        r"\b(click here|download|view|new|latest|notice|notification|update)\b",
+        "",
+        ascii_only,
+        flags=re.IGNORECASE,
+    )
+    ascii_only = re.sub(r"\s+", " ", ascii_only).strip(" -–|:")
 
     words = []
-    for w in cleaned.split():
-        token = w.strip("()[]\"',.")
-        if len(token) >= 2 and token.lower() not in {"the", "of", "for", "and", "in", "on", "to"}:
-            words.append(token)
-    topic_short = " ".join(words[:6]) if words else cleaned[:55]
+    for w in ascii_only.split():
+        tok = w.strip("()[]\"',.")
+        if len(tok) >= 2 and tok.lower() not in {"the", "of", "for", "and", "in", "on", "to"}:
+            words.append(tok)
 
-    if short_org.lower() not in topic_short.lower():
-        base_subject = f"{short_org} {topic_short}".strip()
+    topic_part = " ".join(words[:6]).strip()
+    if not topic_part:
+        topic_part = f"{short_org} Official Update"
+
+    if short_org.lower() not in topic_part.lower():
+        subject = f"{short_org} {topic_part}".strip()
     else:
-        base_subject = topic_short
+        subject = topic_part
 
     deduped = []
-    for w in base_subject.split():
+    for w in subject.split():
         if not deduped or deduped[-1].lower() != w.lower():
             deduped.append(w)
-    subject = " ".join(deduped)[:72].strip()
+    clean_subject = " ".join(deduped)[:70].strip()
 
-    if stage == "Result":
-        return f"{subject} Result {yr}: कैसे चेक करें और मेरिट लिस्ट देखें"
     if stage == "Admit Card":
-        return f"{subject} Admit Card {yr}: डाउनलोड लिंक और परीक्षा निर्देश"
+        return f"{clean_subject} Admit Card {yr}: Download Link, Exam Dates & Guidelines"
     if stage == "Answer Key":
-        return f"{subject} Answer Key {yr}: उत्तर मिलान और आपत्ति प्रक्रिया"
-    return f"{subject} Recruitment {yr}: योग्यता, तिथियां और आवेदन विवरण"
+        return f"{clean_subject} Answer Key {yr}: Response Sheet, Objection & Marking Guide"
+    if stage == "Result":
+        return f"{clean_subject} Result {yr}: Merit List, Scorecard Check & Next Steps"
+    return f"{clean_subject} Recruitment {yr}: Eligibility, Qualification, Dates & How to Apply"
 
 
 def call_gemini_writer(prompt: str) -> str:
@@ -701,173 +733,222 @@ def call_gemini_writer(prompt: str) -> str:
             raw = re.sub(r"^```html\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
             return raw
     except Exception as e:
-        print(f"   [WARN] Gemini लेखन उपलब्ध नहीं हो सका: {e}")
+        print(f"   [WARN] Gemini writer fallback: {e}")
     return ""
 
 
-def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, stage: str, details: dict) -> str:
-    org = portal_info.get("org") or portal_info.get("short_org") or "Government Department"
+def build_writer_html(portal_info: dict, raw_title: str, target_url: str, stage: str, details: dict) -> str:
+    org = portal_info.get("org") or portal_info.get("short_org") or "Government Organization"
     short_org = portal_info.get("short_org") or org
     portal_url = portal_info.get("portal_url") or portal_info.get("url") or CONFIG["wp_site_url"]
+    pdf_url = details.get("pdf_link") or ""
     updated_now = now_ist_str()
 
-    overview_table = f"""
-<h2>मुख्य विवरण (Overview)</h2>
-<p>नीचे दी गई तालिका में <strong>{short_org}</strong> से जुड़े इस <strong>{stage}</strong> अपडेट की मुख्य जानकारियां संक्षेप में दी गई हैं। किसी भी निर्णय या आवेदन से पहले आधिकारिक सूचना अवश्य जांचें।</p>
+    pdf_row = (
+        f'<tr><td><strong>Official PDF / Notice Link</strong></td>'
+        f'<td><a href="{pdf_url}" target="_blank" rel="noopener noreferrer">Open Official PDF</a></td></tr>'
+        if pdf_url
+        else f'<tr><td><strong>Official Notice / Link</strong></td>'
+        f'<td><a href="{target_url}" target="_blank" rel="noopener noreferrer">Open Official Notice</a></td></tr>'
+    )
+
+    website_row = (
+        f'<tr><td><strong>Official Website Link</strong></td>'
+        f'<td><a href="{portal_url}" target="_blank" rel="noopener noreferrer">{portal_url}</a></td></tr>'
+    )
+
+    overview_section = f"""
+<p>Candidates tracking updates from <strong>{org}</strong> can review the complete details for <strong>{raw_title}</strong> below. As an experienced writer organizing information the way applicants actually read it, key links, stage details, and practical steps are structured clearly without fluff or FAQs.</p>
+
+<h2>Quick Overview</h2>
 <table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
   <tbody>
-    <tr><td><strong>विभाग / संस्था</strong></td><td>{org}</td></tr>
-    <tr><td><strong>अपडेट का प्रकार</strong></td><td>{stage} ({details['doc_type']})</td></tr>
-    <tr><td><strong>मूल सूचना / शीर्षक</strong></td><td>{raw_title}</td></tr>
-    <tr><td><strong>पद / वैकेंसी विवरण</strong></td><td>{details['vacancy_info']}</td></tr>
-    <tr><td><strong>पात्रता व आयु सीमा</strong></td><td>{details['qualification_info']} | {details['age_info']}</td></tr>
-    <tr><td><strong>शुल्क व तिथियां</strong></td><td>{details['fee_info']} | तिथियां: {details['dates_info']}</td></tr>
-    <tr><td><strong>Current Status</strong></td><td><strong>{stage}</strong> — ताज़ा आधिकारिक अपडेट</td></tr>
+    <tr><td><strong>Organization / Board</strong></td><td>{org} ({short_org})</td></tr>
+    <tr><td><strong>Update Stage</strong></td><td><strong>{stage}</strong> ({details['doc_type']})</td></tr>
+    <tr><td><strong>Notice / Title</strong></td><td>{raw_title}</td></tr>
+    <tr><td><strong>Vacancy / Post Info</strong></td><td>{details['vacancy_info']}</td></tr>
+    <tr><td><strong>Qualification &amp; Age Limit</strong></td><td>{details['qualification_info']} | {details['age_info']}</td></tr>
+    <tr><td><strong>Application Fee &amp; Dates</strong></td><td>{details['fee_info']} | Dates: {details['dates_info']}</td></tr>
+    {website_row}
+    {pdf_row}
     <tr><td><strong>Last Updated</strong></td><td>{updated_now}</td></tr>
   </tbody>
 </table>
 """
 
-    if stage == "Result":
-        stage_body = f"""
-<h2>रिजल्ट और मेरिट से जुड़ी मुख्य बातें</h2>
-<p><strong>{short_org}</strong> से संबंधित यह <strong>Result</strong> अपडेट उम्मीदवारों के लिए महत्वपूर्ण है। परिणाम से जुड़े नोटिस या लिंक आने के बाद अभ्यर्थियों को अपने रोल नंबर, रजिस्ट्रेशन नंबर और जन्मतिथि के साथ आधिकारिक पोर्टल पर विवरण जांचना चाहिए।</p>
+    if stage == "Admit Card":
+        body_sections = f"""
+<h2>Exam Schedule &amp; Shift Details</h2>
+<p>Before downloading the <strong>{short_org}</strong> admit card, candidates should carefully check the examination date, shift timing, reporting time, and exam center details mentioned on the hall ticket or official schedule.</p>
+<p>Arriving ahead of the reporting time helps avoid last-minute gate closure issues, traffic delays, or verification queues at the test center.</p>
+
+<h2>Eligibility &amp; Admit Card Checkpoints</h2>
 <ul>
-  <li><strong>व्यक्तिगत विवरण जांचें:</strong> स्कोरकार्ड या सूची में नाम, रोल नंबर, श्रेणी और प्राप्तांक/स्थिति का मिलान करें।</li>
-  <li><strong>अगले चरण की तैयारी:</strong> चयन या शॉर्टलिस्ट होने पर दस्तावेज़ सत्यापन (DV), साक्षात्कार या अगले चरण के निर्देश पढ़ें।</li>
-  <li><strong>रिकॉर्ड सुरक्षित रखें:</strong> स्कोरकार्ड या मेरिट से जुड़ी प्रति को भविष्य के संदर्भ के लिए सेव कर लें।</li>
+  <li><strong>Candidate Identity Details:</strong> Verify your name, roll number, registration ID, category, photograph, and signature on the admit card.</li>
+  <li><strong>Center &amp; Shift Accuracy:</strong> Match the exam center address, city, and shift timings with your registered application details.</li>
+  <li><strong>Discrepancy Alert:</strong> If any printed detail is unclear or mismatched, refer to the official instructions on the portal promptly.</li>
 </ul>
-<h2>परिणाम कैसे चेक करें?</h2>
+
+<h2>How to Download Admit Card</h2>
 <ol>
-  <li>आधिकारिक पोर्टल या इस लेख में दिए गए संबंधित लिंक पर जाएं।</li>
-  <li><strong>{raw_title}</strong> से जुड़े रिजल्ट या मेरिट लिंक को खोलें।</li>
-  <li>आवश्यक रोल नंबर/रजिस्ट्रेशन विवरण भरें या पीडीएफ में अपना विवरण खोजें।</li>
-  <li>आगे की प्रक्रिया के लिए विवरण सुरक्षित रखें।</li>
+  <li>Open the official website link listed in the Quick Overview table above.</li>
+  <li>Locate the admit card or candidate login section for <strong>{raw_title}</strong>.</li>
+  <li>Enter your registration/application number, date of birth, or password along with the captcha code.</li>
+  <li>Download the admit card PDF and print clear copies for exam day use.</li>
 </ol>
-"""
-    elif stage == "Admit Card":
-        stage_body = f"""
-<h2>एडमिट कार्ड और परीक्षा निर्देश</h2>
-<p><strong>{short_org}</strong> के इस <strong>Admit Card</strong> अपडेट के अंतर्गत उम्मीदवारों को परीक्षा तिथि, शिफ्ट, परीक्षा केंद्र और आवश्यक निर्देशों से जुड़ी जानकारी मिलती है।</p>
-<ul>
-  <li><strong>विवरणों का मिलान:</strong> नाम, फोटो, हस्ताक्षर, परीक्षा केंद्र और रिपोर्टिंग समय ध्यान से देखें।</li>
-  <li><strong>आवश्यक सामग्री:</strong> एडमिट कार्ड का प्रिंट, वैध मूल फोटो पहचान पत्र और निर्देशानुसार दस्तावेज़ साथ रखें।</li>
-  <li><strong>प्रतिबंधित वस्तुएं:</strong> परीक्षा कक्ष में निषिद्ध सामग्री ले जाने से बचें और नियमों का पालन करें।</li>
-</ul>
-<h2>एडमिट कार्ड कैसे डाउनलोड करें?</h2>
-<ol>
-  <li>आधिकारिक लिंक खोलें और एडमिट कार्ड / लॉगिन अनुभाग पर जाएं।</li>
-  <li>अपना रजिस्ट्रेशन/आवेदन नंबर और जन्मतिथि या पासवर्ड दर्ज करें।</li>
-  <li>कैप्चा कोड भरकर विवरण सबमिट करें।</li>
-  <li>प्रवेश पत्र डाउनलोड करें और साफ प्रिंटआउट निकाल लें।</li>
-</ol>
+
+<h2>Exam Day Instructions &amp; Documents</h2>
+<p>Carry a printed copy of the admit card along with a valid original photo identity proof (such as Aadhaar Card, Voter ID, Driving License, or Passport) and any additional items specified in the instructions.</p>
+<p>Avoid carrying prohibited electronic gadgets, notes, or restricted items into the examination hall so your entry and test session proceed smoothly.</p>
 """
     elif stage == "Answer Key":
-        stage_body = f"""
-<h2>आंसर की और उत्तर मिलान की जानकारी</h2>
-<p><strong>{short_org}</strong> से जुड़े इस <strong>Answer Key</strong> अपडेट की मदद से उम्मीदवार अपनी परीक्षा के संभावित अंकों का अनुमान लगा सकते हैं।</p>
-<ul>
-  <li><strong>सही मिलान:</strong> प्रश्न संख्या या प्रश्न आईडी के अनुसार उत्तरों का मिलान करें।</li>
-  <li><strong>अंक गणना:</strong> सही उत्तर और नेगेटिव मार्किंग (यदि लागू हो) के नियमों को ध्यान में रखें।</li>
-  <li><strong>आपत्ति विंडो:</strong> किसी प्रश्न पर आपत्ति होने पर अंतिम तिथि से पहले आधिकारिक माध्यम से प्रक्रिया पूरी करें।</li>
-</ul>
-<h2>आंसर की कैसे देखें?</h2>
+        body_sections = f"""
+<h2>Answer Key &amp; Marking Overview</h2>
+<p>This <strong>{short_org}</strong> answer key update helps candidates cross-check their responses and estimate probable scores before official results are compiled.</p>
+<p>Always verify the question paper set, shift code, question ID, and official marking scheme before calculating your expected marks.</p>
+
+<h2>How to Check Answer Key</h2>
 <ol>
-  <li>आधिकारिक पोर्टल या नीचे दिए गए संबंधित लिंक पर क्लिक करें।</li>
-  <li><strong>{raw_title}</strong> से जुड़ा सेक्शन या पीडीएफ खोलें।</li>
-  <li>अपने उत्तरों का मिलान करें और आवश्यकता होने पर फाइल सेव कर लें।</li>
+  <li>Visit the official portal or open the official notice/PDF link provided in the Quick Overview table.</li>
+  <li>Open the answer key or response sheet link related to <strong>{raw_title}</strong>.</li>
+  <li>Match your recorded responses with the official key for your specific paper/shift.</li>
+  <li>Save a copy of the answer key and response sheet for personal reference.</li>
 </ol>
+
+<h2>Objection Process &amp; Timeline</h2>
+<ul>
+  <li><strong>Check Objection Window:</strong> Note the opening and closing dates if challenges/objections are invited against provisional answers.</li>
+  <li><strong>Supporting Reference:</strong> Follow the exact procedure and fee/rule terms stated in the official notice when raising any objection.</li>
+  <li><strong>Final Key Priority:</strong> Treat the final answer key issued by the authority as conclusive for evaluation.</li>
+</ul>
+
+<h2>Score Calculation Guidelines</h2>
+<p>Count correct answers according to the positive marks per question and apply negative marking deductions wherever applicable under the exam rules.</p>
+<p>Keep in mind that normalized scores or final merit lists may differ slightly from raw estimates once final evaluation is completed.</p>
+"""
+    elif stage == "Result":
+        body_sections = f"""
+<h2>Result &amp; Merit Highlights</h2>
+<p>Candidates awaiting the outcome for <strong>{short_org}</strong> should verify their status strictly through the official result link or merit PDF listed in the Quick Overview table.</p>
+<p>Check your roll number, registration number, name, and category carefully to confirm whether you have been shortlisted or selected for the next stage.</p>
+
+<h2>How to Check Result &amp; Scorecard</h2>
+<ol>
+  <li>Open the official portal link or notice link from the Quick Overview table above.</li>
+  <li>Select the result or merit list update corresponding to <strong>{raw_title}</strong>.</li>
+  <li>Search your roll number/name in the merit PDF or log in with credentials to view your scorecard.</li>
+  <li>Download and save the result page or scorecard for future stages.</li>
+</ol>
+
+<h2>Selection Stages &amp; Cut-Off Notes</h2>
+<ul>
+  <li><strong>Stage Progression:</strong> Note whether this result covers written exam, skill/trade test, physical test, interview, or final selection.</li>
+  <li><strong>Category &amp; Cut-Offs:</strong> Review category-wise cut-off marks or qualifying criteria if published alongside the result.</li>
+  <li><strong>Official Verification:</strong> Rely only on official portal files rather than forwarded screenshots or unverified messages.</li>
+</ul>
+
+<h2>Document Verification &amp; Next Steps</h2>
+<p>Shortlisted candidates should keep original certificates, mark sheets, category/domicile certificates, and ID proofs organized in advance for verification.</p>
+<p>Follow upcoming instructions on the official portal closely so no deadline or reporting schedule is missed.</p>
 """
     else:
-        stage_body = f"""
-<h2>भर्ती और आवेदन से जुड़ी मुख्य बातें</h2>
-<p><strong>{short_org}</strong> के इस <strong>Jobs</strong> अपडेट के माध्यम से उम्मीदवारों को भर्ती, पद, पात्रता और आवेदन से जुड़ी महत्वपूर्ण जानकारी मिलती है।</p>
+        body_sections = f"""
+<h2>Vacancy &amp; Post Highlights</h2>
+<p>This recruitment update from <strong>{short_org}</strong> provides essential details for applicants looking at <strong>{raw_title}</strong>. Read the official notification carefully to confirm post-wise vacancies, pay/level details, and application rules before starting your form.</p>
+<p>Because portals can slow down close to the deadline, verifying eligibility early and completing registration calmly helps avoid technical hurdles.</p>
+
+<h2>Eligibility Criteria &amp; Age Limit</h2>
+<p>Candidates must meet the prescribed age limit and eligibility conditions as of the reference date specified in the official notification.</p>
 <ul>
-  <li><strong>पात्रता की जांच:</strong> शैक्षणिक योग्यता, आयु सीमा और अनुभव (यदि लागू हो) की शर्तें मिलाएं।</li>
-  <li><strong>दस्तावेज़ व फोटो:</strong> आवेदन से पहले आवश्यक प्रमाणपत्र, फोटो और हस्ताक्षर तैयार रखें।</li>
-  <li><strong>फीस व सबमिशन:</strong> शुल्क भुगतान और अंतिम सबमिशन के बाद कन्फर्मेशन प्रति सुरक्षित रखें।</li>
+  <li><strong>Age Bracket:</strong> Current extracted reference indicates <strong>{details['age_info']}</strong>.</li>
+  <li><strong>Age Relaxation:</strong> Reserved categories may be eligible for age relaxation strictly as per government/notification norms.</li>
+  <li><strong>Nationality &amp; Rules:</strong> Confirm citizenship and post-specific conditions in the official notice before applying.</li>
 </ul>
-<h2>आवेदन कैसे करें?</h2>
+
+<h2>Educational Qualification</h2>
+<p>Applicants should possess the required educational qualification on or before the closing date mentioned in the recruitment notice.</p>
+<ul>
+  <li><strong>Qualification Summary:</strong> Current extracted reference indicates <strong>{details['qualification_info']}</strong>.</li>
+  <li><strong>Stream / Trade / Degree:</strong> Check whether a specific degree, diploma, ITI trade, or board/university recognition is required for your target post.</li>
+</ul>
+
+<h2>Application Fee &amp; Selection Process</h2>
+<p>Review the fee structure (<strong>{details['fee_info']}</strong>) and understand every stage of the selection process—such as written examination, skill/typing/physical test, document verification, and medical/interview stages—before submitting the application.</p>
+
+<h2>How to Apply Online</h2>
 <ol>
-  <li>आधिकारिक वेबसाइट (<a href="{portal_url}" target="_blank" rel="noopener noreferrer">{portal_url}</a>) या संबंधित लिंक पर जाएं।</li>
-  <li>नोटिफिकेशन में दिए गए निर्देशों के अनुसार रजिस्ट्रेशन करें।</li>
-  <li>आवेदन फॉर्म में सही विवरण भरें और आवश्यक दस्तावेज़ अपलोड करें।</li>
-  <li>निर्धारित शुल्क जमा करें और अंतिम फॉर्म का प्रिंट या पीडीएफ सुरक्षित रखें।</li>
+  <li>Go to the official website link or official notification link provided in the Quick Overview table.</li>
+  <li>Read the instructions thoroughly and complete one-time/fresh registration with accurate personal details.</li>
+  <li>Fill out the online application form, upload required documents/photo/signature in prescribed format, and pay the applicable fee.</li>
+  <li>Submit the form and save/print the final confirmation page for future reference.</li>
 </ol>
 """
 
-    headings_section = ""
+    extracted_headings_note = ""
     if details.get("headings"):
-        h_bullets = "".join(
-            f"<li><strong>{clean_text(h)}:</strong> आधिकारिक सूचना का यह हिस्सा उम्मीदवारों के लिए महत्वपूर्ण नियम व विवरण दर्शाता है।</li>"
-            for h in details["headings"][:5]
+        items_html = "".join(
+            f"<li><strong>{clean_text(h)}:</strong> Covered in the official notice for candidate review.</li>"
+            for h in details["headings"][:4]
         )
-        headings_section = f"<h2>आधिकारिक सूचना के प्रमुख खंड</h2><ul>{h_bullets}</ul>"
-
-    links_and_faq = f"""
-{headings_section}
-<h2>महत्वपूर्ण लिंक्स</h2>
-<table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
-  <tbody>
-    <tr><td><strong>संबंधित आधिकारिक लिंक / सूचना</strong></td><td><a href="{target_url}" target="_blank" rel="noopener noreferrer">आधिकारिक लिंक खोलें</a></td></tr>
-    <tr><td><strong>आधिकारिक वेबसाइट ({short_org})</strong></td><td><a href="{portal_url}" target="_blank" rel="noopener noreferrer">{org}</a></td></tr>
-  </tbody>
-</table>
-<h2>अक्सर पूछे जाने वाले प्रश्न (FAQs)</h2>
-<p><strong>प्रश्न 1: इस {stage} अपडेट की आधिकारिक पुष्टि कहाँ से करें?</strong><br>
-उत्तर: इस अपडेट की सबसे प्रामाणिक और अंतिम पुष्टि <strong>{org}</strong> की आधिकारिक वेबसाइट (<a href="{portal_url}" target="_blank" rel="noopener noreferrer">{portal_url}</a>) से ही करें।</p>
-<p><strong>प्रश्न 2: क्या इस पोस्ट में आगे भी बदलाव किया जा सकता है?</strong><br>
-उत्तर: हाँ, नया चरण, तिथि या लिंक आने पर इसी पोस्ट को ताज़ा स्थिति और <strong>Last Updated</strong> समय के साथ अपडेट किया जाता है।</p>
+        extracted_headings_note = f"""
+<h2>Key Sections Found in Official Notice</h2>
+<ul>
+  {items_html}
+</ul>
 """
 
-    return f"""<p><strong>{raw_title}</strong> से जुड़ा यह अपडेट <strong>{org}</strong> के आधिकारिक स्रोत से प्राप्त किया गया है। यह लेख <strong>{stage}</strong> श्रेणी के अंतर्गत तैयार किया गया है ताकि उम्मीदवारों को मुख्य बिंदु, नियम और आधिकारिक लिंक एक ही स्थान पर स्पष्ट रूप से मिल सकें।</p>
-{overview_table}
-{stage_body}
-{links_and_faq}""".strip()
+    writer_tips_section = f"""
+{extracted_headings_note}
+<h2>Important Candidate Tips</h2>
+<p>An experienced applicant treats every recruitment or exam update as a sequence of verified steps rather than rushing through a single screen.</p>
+<ul>
+  <li><strong>Keep Details Consistent:</strong> Ensure your name, date of birth, category, and registration details match across your application, ID proof, and certificates.</li>
+  <li><strong>Maintain a Dedicated Folder:</strong> Store PDFs of the notification, application form, fee receipt, admit card, and scorecard in one place.</li>
+  <li><strong>Recheck Before Final Submit:</strong> Double-check spelling, exam center/post preferences, and uploaded files before final submission or deadline closure.</li>
+</ul>
+"""
+
+    return f"{overview_section}\n{body_sections}\n{writer_tips_section}".strip()
 
 
 def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, stage: str, min_words: int) -> str:
-    short_org = portal_info["short_org"]
-    org = portal_info["org"]
+    org = portal_info.get("org") or portal_info.get("short_org") or "Government Organization"
+    short_org = portal_info.get("short_org") or org
 
-    extra_sections = [
+    extra_blocks = [
         f"""
-<h2>उम्मीदवारों के लिए व्यावहारिक तैयारी और सावधानियां</h2>
-<p>सरकारी परीक्षाओं और भर्तियों की प्रक्रिया में सही समय पर सही जानकारी होना बहुत बड़ा अंतर पैदा करता है। <strong>{short_org}</strong> से जुड़े इस <strong>{stage}</strong> अपडेट के दौरान उम्मीदवारों को जल्दबाजी के बजाय व्यवस्थित तरीके से आगे बढ़ना चाहिए।</p>
+<h2>Practical Preparation &amp; Verification Checklist</h2>
+<p>Candidates applying or tracking updates for <strong>{short_org}</strong> ({raw_title}) benefit from following a clear personal checklist at every stage. Rushing through instructions often leads to avoidable mistakes in form filling, document upload, or exam day reporting.</p>
+<p>Always cross-check key details from the official notification or notice PDF so you rely on verified facts rather than assumptions or secondary rumors.</p>
 <ul>
-  <li><strong>सही विवरण दर्ज करें:</strong> नाम, जन्मतिथि, श्रेणी और रजिस्ट्रेशन नंबर जैसी जानकारी में अंतर न होने दें।</li>
-  <li><strong>आधिकारिक स्रोतों पर भरोसा करें:</strong> अनौपचारिक समूहों या अधूरी पोस्ट्स के बजाय केवल आधिकारिक पोर्टल के निर्देश मानें।</li>
-  <li><strong>दस्तावेज़ों का बैकअप रखें:</strong> महत्वपूर्ण फॉर्म, प्रवेश पत्र, स्कोरकार्ड और रसीदों की डिजिटल व प्रिंट प्रति सुरक्षित रखें।</li>
+  <li><strong>Eligibility &amp; Dates Check:</strong> Confirm qualifications, age rules, and important dates before starting or acting on any step.</li>
+  <li><strong>Document Readiness:</strong> Keep scanned copies and original certificates ready well ahead of time.</li>
+  <li><strong>Timely Action:</strong> Avoid waiting until the final hours when portal traffic is usually highest.</li>
 </ul>
 """,
         f"""
-<h2>समय प्रबंधन और आगे के चरणों की योजना</h2>
-<p>चाहे आप आवेदन कर रहे हों, परीक्षा की तैयारी कर रहे हों, उत्तर कुंजी मिला रहे हों या परिणाम व अगले राउंड की प्रतीक्षा कर रहे हों—एक स्पष्ट योजना आपकी तैयारी को मजबूत बनाती है। <strong>{org}</strong> की प्रक्रिया में प्रत्येक चरण के लिए तय नियम और समय-सीमा निर्धारित होती है।</p>
-<ul>
-  <li><strong>नियमित जांच:</strong> आधिकारिक वेबसाइट पर आने वाले नए नोटिस, संशोधनों या शेड्यूल पर नज़र रखें।</li>
-  <li><strong>स्पष्ट नोट्स बनाएं:</strong> महत्वपूर्ण तिथियां, रजिस्ट्रेशन विवरण और निर्देश एक जगह नोट रखें।</li>
-  <li><strong>सटीक मार्गदर्शन:</strong> किसी भी नियम को लेकर संदेह होने पर मूल अधिसूचना का संबंधित पैराग्राफ दोबारा पढ़ें।</li>
-</ul>
+<h2>Step-by-Step Candidate Approach</h2>
+<p>Whether you are checking a new notification, downloading an admit card, matching an answer key, or viewing a result for <strong>{org}</strong>, a disciplined approach saves time and prevents errors.</p>
+<p>Read each section of the official notice carefully, note any instructions specific to your category or post, and keep copies of every confirmation or download for future reference.</p>
 """,
     ]
 
-    result_html = html_content
+    out_html = html_content
     idx = 0
-    while count_words_from_html(result_html) < min_words and idx < len(extra_sections):
-        result_html = f"{result_html}\n{extra_sections[idx]}"
+    while count_words_from_html(out_html) < min_words and idx < len(extra_blocks):
+        out_html = f"{out_html}\n{extra_blocks[idx]}"
         idx += 1
 
-    counter = 1
-    while count_words_from_html(result_html) < min_words:
-        result_html += (
-            f"\n<p><strong>अतिरिक्त मार्गदर्शन ({counter}):</strong> {short_org} के इस {stage} अपडेट "
-            f"({raw_title}) से संबंधित उम्मीदवारों को सलाह दी जाती है कि वे आवेदन, परीक्षा, उत्तर मिलान "
-            f"या परिणाम जांचने से पूर्व आधिकारिक पोर्टल पर प्रकाशित सभी शर्तों व निर्देशों की पुष्टि "
-            f"अवश्य करें तथा अपनी लॉगिन व दस्तावेज़ संबंधी जानकारी सुरक्षित रखें।</p>"
+    extra_num = 1
+    while count_words_from_html(out_html) < min_words:
+        out_html += (
+            f"\n<p><strong>Candidate Note {extra_num}:</strong> For {short_org} ({raw_title}) under {stage}, "
+            f"always verify all eligibility conditions, dates, instructions, and official links directly from "
+            f"the official source and retain copies of your records for future reference.</p>"
         )
-        counter += 1
+        extra_num += 1
 
-    return result_html.strip()
+    return out_html.strip()
 
 
 def build_complete_article(
@@ -879,45 +960,50 @@ def build_complete_article(
     is_live_update: bool = False,
     stages_history: list | None = None,
 ) -> tuple[str, str, int]:
-    seo_title = build_search_friendly_title(portal_info["short_org"], raw_title, stage)
-    base_html = build_stage_core_html(portal_info, raw_title, target_url, stage, details)
+    short_org = portal_info.get("short_org") or portal_info.get("org") or "Govt"
+    seo_title = build_english_seo_title(short_org, raw_title, stage)
+    base_html = build_writer_html(portal_info, raw_title, target_url, stage, details)
 
     if is_live_update and stages_history:
-        flow_txt = " &rarr; ".join(stages_history)
-        update_box = (
-            f"<p><strong>लाइव अपडेट नोट:</strong> इस पोस्ट को उसी विषय/आर्टिकल पर नए चरण या जानकारी के अनुसार "
-            f"अपडेट किया गया है (चरण इतिहास: <strong>{flow_txt}</strong>)। वर्तमान में <strong>{stage}</strong> "
-            f"से जुड़ी जानकारी को प्राथमिकता दी गई है।</p>\n"
+        flow_str = " &rarr; ".join(stages_history)
+        update_note = (
+            f"<p><strong>Live Update:</strong> This existing post has been updated for the latest stage "
+            f"(<strong>{stage}</strong> | Stage Flow: <strong>{flow_str}</strong>).</p>\n"
         )
-        base_html = f"{update_box}{base_html}"
+        base_html = f"{update_note}{base_html}"
 
     if CONFIG["gemini_api_key"]:
         prompt = f"""
-आप एक प्रोफेशनल हिंदी कंटेंट राइटर हैं जो सरकारी भर्ती, एडमिट कार्ड, आंसर की और रिजल्ट के लिए स्पष्ट, भरोसेमंद और पढ़ने में आसान लेख लिखते हैं।
-नीचे दिए गए आधारभूत HTML कंटेंट को बेहतर और स्वाभाविक हिंदी में सुधारें/विस्तार दें ताकि यह कम से कम {CONFIG['min_words']} शब्दों का हो।
+You are an experienced government jobs & exam content writer writing for an Indian candidate audience.
+Improve and expand the HTML article below so it reads naturally, clearly, and thoroughly for candidates, with at least {CONFIG['min_words']} words.
 
-नियम:
-- केवल शुद्ध HTML (`<h2>`, `<h3>`, `<p>`, `<ul>`, `<ol>`, `<table>`, `<tr>`, `<td>`, `<strong>`, `<a>`) दें, markdown ``` न लगाएं।
-- पैराग्राफ छोटे और स्पष्ट रखें, साथ में बुलेट पॉइंट्स और टेबल बनाए रखें।
-- बिना किसी आधार के कोई काल्पनिक तारीख, पद संख्या या दावा न जोड़ें।
+Strict Rules:
+- Write the SEO title mindset, all <h2>/<h3> headings, and the article body in clear, natural English.
+- Do NOT include any FAQ section or Q&A blocks.
+- Keep the Quick Overview table at the top with the official website link and official PDF/notice link; do NOT create a separate heading for official website.
+- Structure headings around what a candidate actually needs for stage "{stage}" (such as Eligibility, Qualification, How to Apply, Admit Card/Exam Instructions, Answer Key/Objection, Result/Next Steps, Candidate Tips).
+- Return ONLY clean HTML (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>), no markdown ``` fences.
+- Do not invent fake dates, vacancy numbers, or unverified claims; keep "As per official notification" where facts are not stated.
 
-शीर्षक: {seo_title}
-विभाग: {portal_info['org']}
-चरण: {stage}
+Title: {seo_title}
+Organization: {portal_info.get('org', short_org)}
+Stage: {stage}
 
-आधारभूत HTML:
+Base HTML:
 {base_html[:6500]}
 """
         ai_html = call_gemini_writer(prompt)
         if ai_html and count_words_from_html(ai_html) >= 700:
+            ai_html = re.sub(r"<h[23][^>]*>.*?(?:faq|frequently asked questions).*?</h[23]>.*?(?=<h[23]|$)", "", ai_html, flags=re.IGNORECASE | re.DOTALL)
             final_html = ensure_minimum_words(ai_html, portal_info, raw_title, stage, CONFIG["min_words"])
             return seo_title, final_html, count_words_from_html(final_html)
 
     final_html = ensure_minimum_words(base_html, portal_info, raw_title, stage, CONFIG["min_words"])
     return seo_title, final_html, count_words_from_html(final_html)
 
+
 # ==============================================================================
-# 7. WORDPRESS पब्लिश व लाइव अपडेट (DRAFT BY DEFAULT)
+# 7. WORDPRESS PUBLISH & LIVE UPDATE (DRAFT BY DEFAULT)
 # ==============================================================================
 def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tuple[bool, int, str]:
     preview_file = os.path.join(CONFIG["cache_dir"], "last_generated_article.html")
@@ -952,8 +1038,9 @@ def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tup
         print(f"   [WP ERROR] '{title}': {e}")
         return False, wp_post_id, ""
 
+
 # ==============================================================================
-# 8. मुख्य निष्पादन चक्र
+# 8. MAIN EXECUTION PIPELINE
 # ==============================================================================
 def fetch_portal_candidates(portal_info: dict) -> list[dict]:
     candidates = []
@@ -1017,16 +1104,17 @@ def run_writer_pipeline() -> None:
 
     print("=" * 72)
     print(f"{CONFIG['site_name']} Engine | Mode: {'FIRST BOOT (BASELINE LOCK)' if is_first_boot else 'LIVE SCAN MODE'}")
-    print(f"रन समय (IST): {now_ist_str()} | बोट कटऑफ: {boot_cutoff_dt.strftime('%d-%m-%Y %H:%M IST')}")
+    print(f"Run Time (IST): {now_ist_str()} | Boot Cutoff: {boot_cutoff_dt.strftime('%d-%m-%Y %H:%M IST')}")
     print("=" * 72)
 
     new_created = 0
     live_updated = 0
     skipped_items = 0
+    processed_topic_keys_this_run = set()
 
     for idx, portal in enumerate(GOVT_PORTALS, start=1):
         candidates = fetch_portal_candidates(portal)
-        print(f"[{idx:02d}/{len(GOVT_PORTALS)}] {portal['short_org']}: {len(candidates)} आइटम जांचे गए")
+        print(f"[{idx:02d}/{len(GOVT_PORTALS)}] {portal['short_org']}: {len(candidates)} items found")
 
         if is_first_boot:
             for item in candidates:
@@ -1036,6 +1124,11 @@ def run_writer_pipeline() -> None:
         for item in candidates:
             notice_sig = item["notice_sig"]
             topic_key = item["topic_key"]
+
+            if topic_key in processed_topic_keys_this_run:
+                skipped_items += 1
+                continue
+
             existing = get_article_record(topic_key)
 
             details = extract_context_details(
@@ -1048,7 +1141,7 @@ def run_writer_pipeline() -> None:
             ).hexdigest()
 
             if existing is None:
-                eligible, reason = is_arrived_after_boot(details, notice_sig, boot_cutoff_dt)
+                eligible, _ = is_arrived_after_boot(details, notice_sig, boot_cutoff_dt)
                 if not eligible:
                     skipped_items += 1
                     continue
@@ -1079,6 +1172,7 @@ def run_writer_pipeline() -> None:
                         "content_hash": content_hash, "word_count": wc,
                         "wp_post_id": wp_id, "created_at": now_str, "updated_at": now_str,
                     })
+                    processed_topic_keys_this_run.add(topic_key)
                     new_created += 1
                     print(f"   [NEW DRAFT] [{item['stage']}] ({wc} words) -> {seo_title}")
 
@@ -1126,6 +1220,7 @@ def run_writer_pipeline() -> None:
                         "created_at": existing.get("created_at") or now_str,
                         "updated_at": now_str,
                     })
+                    processed_topic_keys_this_run.add(topic_key)
                     live_updated += 1
                     print(f"   [LIVE UPDATE] [{existing['stage']} -> {item['stage']}] ({wc} words) -> {seo_title}")
 
