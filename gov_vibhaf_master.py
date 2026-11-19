@@ -13,29 +13,26 @@ from bs4 import BeautifulSoup
 
 try:
     import pymupdf as fitz
-
     PYMUPDF_AVAILABLE = True
 except ImportError:
     try:
         import fitz
-
         PYMUPDF_AVAILABLE = True
     except ImportError:
         PYMUPDF_AVAILABLE = False
 
-
 # ==============================================================================
-# 1. कॉन्फ़िगरेशन (FROM-NOW-ON CUTOFF + DRAFT + NO REPEAT + LIVE UPDATE)
+# 1. कॉन्फ़िगरेशन (CONFIGURATION)
 # ==============================================================================
 CONFIG = {
     "site_name": "GovtVibhag",
     "wp_site_url": os.getenv("WP_SITE_URL", "https://govtvibhag.com").strip().rstrip("/"),
     "wp_username": os.getenv("WP_USERNAME", "").strip(),
     "wp_app_password": os.getenv("WP_APP_PASSWORD", "").strip(),
-    "wp_post_status": os.getenv("WP_POST_STATUS", "draft").strip().lower(),  # पहले चेक करने के लिए 'draft'
+    "wp_post_status": os.getenv("WP_POST_STATUS", "draft").strip().lower(),
     "gemini_api_key": os.getenv("GEMINI_API_KEY", "").strip(),
     "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
-    "db_path": os.getenv("DB_PATH", "scraped_data_cache/govtvibhag_from_now.db").strip(),
+    "db_path": os.getenv("DB_PATH", "scraped_data_cache/govtvibhag_master.db").strip(),
     "cache_dir": os.getenv("CACHE_DIR", "scraped_data_cache").strip(),
     "min_words": int(os.getenv("MIN_ARTICLE_WORDS", "1050")),
     "max_items_per_portal": int(os.getenv("MAX_ITEMS_PER_PORTAL", "6")),
@@ -54,9 +51,8 @@ HTTP_HEADERS = {
     "Accept-Language": "hi-IN,hi;q=0.9,en-IN;q=0.8,en;q=0.7",
 }
 
-
 # ==============================================================================
-# 2. आधिकारिक सरकारी पोर्टल्स (OFFICIAL GOVERNMENT PORTALS)
+# 2. आधिकारिक सरकारी पोर्टल्स
 # ==============================================================================
 GOVT_PORTALS = [
     {"url": "https://ssc.gov.in", "org": "Staff Selection Commission (SSC)", "short_org": "SSC"},
@@ -131,20 +127,11 @@ GENERIC_LABELS = {
 }
 
 MONTH_MAP = {
-    "jan": 1, "january": 1,
-    "feb": 2, "february": 2,
-    "mar": 3, "march": 3,
-    "apr": 4, "april": 4,
-    "may": 5,
-    "jun": 6, "june": 6,
-    "jul": 7, "july": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10,
-    "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
-
 
 # ==============================================================================
 # 3. समय व डेटाबेस (IST TIME & SQLITE STATE)
@@ -209,27 +196,24 @@ def init_db() -> None:
 
 
 def get_or_lock_boot_time(current_boot_dt: datetime) -> tuple[datetime, bool]:
-    """
-    पहली बार बोट चालू करते ही समय लॉक करता है (is_first_boot = True)।
-    बाद के रन्स में वही लॉक समय रहता है ताकि बोट चालू करने से पहले की चीज़ों पर नया आर्टिकल न बने।
-    """
     conn = sqlite3.connect(CONFIG["db_path"])
     cur = conn.cursor()
     cur.execute("SELECT meta_value FROM runtime_meta WHERE meta_key = 'boot_started_iso'")
     row = cur.fetchone()
-    if not row:
-        cur.execute(
-            "INSERT OR REPLACE INTO runtime_meta (meta_key, meta_value) VALUES ('boot_started_iso', ?)",
-            (current_boot_dt.isoformat(),),
-        )
-        conn.commit()
+    if row and row[0]:
         conn.close()
-        return current_boot_dt, True
+        try:
+            return datetime.fromisoformat(row[0]), False
+        except Exception:
+            return current_boot_dt, False
+
+    cur.execute(
+        "INSERT INTO runtime_meta (meta_key, meta_value) VALUES ('boot_started_iso', ?)",
+        (current_boot_dt.isoformat(),),
+    )
+    conn.commit()
     conn.close()
-    try:
-        return datetime.fromisoformat(row[0]), False
-    except Exception:
-        return current_boot_dt, False
+    return current_boot_dt, True
 
 
 def is_in_baseline_snapshot(notice_sig: str) -> bool:
@@ -269,19 +253,11 @@ def get_article_record(topic_key: str) -> dict | None:
     if not row:
         return None
     return {
-        "topic_key": row[0],
-        "portal_url": row[1],
-        "short_org": row[2],
-        "raw_title": row[3],
-        "seo_title": row[4],
-        "stage": row[5],
-        "stages_history": json.loads(row[6] or "[]"),
-        "target_url": row[7],
-        "content_hash": row[8],
-        "word_count": row[9],
-        "wp_post_id": row[10],
-        "created_at": row[11],
-        "updated_at": row[12],
+        "topic_key": row[0], "portal_url": row[1], "short_org": row[2],
+        "raw_title": row[3], "seo_title": row[4], "stage": row[5],
+        "stages_history": json.loads(row[6] or "[]"), "target_url": row[7],
+        "content_hash": row[8], "word_count": row[9], "wp_post_id": row[10],
+        "created_at": row[11], "updated_at": row[12],
     }
 
 
@@ -295,27 +271,18 @@ def upsert_article_record(record: dict) -> None:
             created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            record["topic_key"],
-            record["portal_url"],
-            record["short_org"],
-            record["raw_title"],
-            record["seo_title"],
-            record["stage"],
+            record["topic_key"], record["portal_url"], record["short_org"],
+            record["raw_title"], record["seo_title"], record["stage"],
             json.dumps(record["stages_history"], ensure_ascii=False),
-            record["target_url"],
-            record["content_hash"],
-            record["word_count"],
-            record["wp_post_id"],
-            record["created_at"],
-            record["updated_at"],
+            record["target_url"], record["content_hash"], record["word_count"],
+            record["wp_post_id"], record["created_at"], record["updated_at"],
         ),
     )
     conn.commit()
     conn.close()
 
-
 # ==============================================================================
-# 4. टेक्स्ट सफ़ाई, चरण पहचान व टॉपिक की (TEXT CLEANING, STAGE & TOPIC KEY)
+# 4. टेक्स्ट सफ़ाई, चरण पहचान व टॉपिक की
 # ==============================================================================
 def clean_text(text: str) -> str:
     if not text:
@@ -376,9 +343,8 @@ def is_valid_notice_candidate(title: str, full_url: str) -> bool:
     all_stage_words = [w for words in STAGE_KEYWORDS.values() for w in words]
     return any(w in low_t or w in low_u for w in all_stage_words) or (".pdf" in low_u)
 
-
 # ==============================================================================
-# 5. लचीला HTTP फेचर + स्मार्ट बैकअप फ़ॉलबैक + "बोट चालू होने के बाद" जांच
+# 5. लचीला HTTP फेचर + फ़ॉलबैक + बोट कटऑफ जांच
 # ==============================================================================
 def fetch_url_flexible(url: str) -> requests.Response | None:
     try:
@@ -441,15 +407,10 @@ def fetch_fallback_updates(portal_info: dict) -> list[dict]:
             notice_sig = build_notice_signature(short_org, raw_title, link_val)
 
             results.append({
-                "notice_sig": notice_sig,
-                "topic_key": topic_key,
-                "portal_url": portal_url,
-                "org": portal_info["org"],
-                "short_org": short_org,
-                "title": raw_title,
-                "target_url": link_val,
-                "stage": stage,
-                "fallback_dt": pub_dt,
+                "notice_sig": notice_sig, "topic_key": topic_key,
+                "portal_url": portal_url, "org": portal_info["org"],
+                "short_org": short_org, "title": raw_title,
+                "target_url": link_val, "stage": stage, "fallback_dt": pub_dt,
             })
     except Exception:
         pass
@@ -519,13 +480,6 @@ def extract_timestamp_details(
 
 
 def is_arrived_after_boot(details: dict, notice_sig: str, boot_cutoff_dt: datetime) -> tuple[bool, str]:
-    """
-    नियम:
-    - बोट चालू होने के समय (boot_cutoff_dt) से पहले वेबसाइट पर जो भी था (baseline_snapshot में लॉक),
-      उस पर नया आर्टिकल नहीं बनेगा।
-    - यदि किसी नोटिस/PDF की स्पष्ट तारीख/समय बोट चालू होने के समय से पहले का है, तो भी नया आर्टिकल नहीं बनेगा।
-    - बोट चालू होने के बाद आने वाले नए अपडेट्स पर आर्टिकल बनेगा।
-    """
     if is_in_baseline_snapshot(notice_sig):
         return False, "बोट चालू करने से पहले का डाटा (Baseline में लॉक)"
 
@@ -693,7 +647,6 @@ def extract_context_details(raw_title: str, target_url: str, fallback_dt: dateti
 
     return details
 
-
 # ==============================================================================
 # 6. सर्च-फ्रेंडली SEO टाइटल व प्रोफेशनल 1000+ वर्ड आर्टिकल बिल्डर
 # ==============================================================================
@@ -761,38 +714,14 @@ def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, st
 <p>नीचे दी गई तालिका में <strong>{short_org}</strong> से जुड़े इस <strong>{stage}</strong> अपडेट की मुख्य जानकारियां संक्षेप में दी गई हैं। किसी भी निर्णय या आवेदन से पहले आधिकारिक सूचना अवश्य जांचें।</p>
 <table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
   <tbody>
-    <tr>
-      <td><strong>विभाग / संस्था</strong></td>
-      <td>{org}</td>
-    </tr>
-    <tr>
-      <td><strong>अपडेट का प्रकार</strong></td>
-      <td>{stage} ({details['doc_type']})</td>
-    </tr>
-    <tr>
-      <td><strong>मूल सूचना / शीर्षक</strong></td>
-      <td>{raw_title}</td>
-    </tr>
-    <tr>
-      <td><strong>पद / वैकेंसी विवरण</strong></td>
-      <td>{details['vacancy_info']}</td>
-    </tr>
-    <tr>
-      <td><strong>पात्रता व आयु सीमा</strong></td>
-      <td>{details['qualification_info']} | {details['age_info']}</td>
-    </tr>
-    <tr>
-      <td><strong>शुल्क व तिथियां</strong></td>
-      <td>{details['fee_info']} | तिथियां: {details['dates_info']}</td>
-    </tr>
-    <tr>
-      <td><strong>Current Status</strong></td>
-      <td><strong>{stage}</strong> — ताज़ा आधिकारिक अपडेट</td>
-    </tr>
-    <tr>
-      <td><strong>Last Updated</strong></td>
-      <td>{updated_now}</td>
-    </tr>
+    <tr><td><strong>विभाग / संस्था</strong></td><td>{org}</td></tr>
+    <tr><td><strong>अपडेट का प्रकार</strong></td><td>{stage} ({details['doc_type']})</td></tr>
+    <tr><td><strong>मूल सूचना / शीर्षक</strong></td><td>{raw_title}</td></tr>
+    <tr><td><strong>पद / वैकेंसी विवरण</strong></td><td>{details['vacancy_info']}</td></tr>
+    <tr><td><strong>पात्रता व आयु सीमा</strong></td><td>{details['qualification_info']} | {details['age_info']}</td></tr>
+    <tr><td><strong>शुल्क व तिथियां</strong></td><td>{details['fee_info']} | तिथियां: {details['dates_info']}</td></tr>
+    <tr><td><strong>Current Status</strong></td><td><strong>{stage}</strong> — ताज़ा आधिकारिक अपडेट</td></tr>
+    <tr><td><strong>Last Updated</strong></td><td>{updated_now}</td></tr>
   </tbody>
 </table>
 """
@@ -801,15 +730,12 @@ def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, st
         stage_body = f"""
 <h2>रिजल्ट और मेरिट से जुड़ी मुख्य बातें</h2>
 <p><strong>{short_org}</strong> से संबंधित यह <strong>Result</strong> अपडेट उम्मीदवारों के लिए महत्वपूर्ण है। परिणाम से जुड़े नोटिस या लिंक आने के बाद अभ्यर्थियों को अपने रोल नंबर, रजिस्ट्रेशन नंबर और जन्मतिथि के साथ आधिकारिक पोर्टल पर विवरण जांचना चाहिए।</p>
-<p>परिणाम देखते समय केवल आधिकारिक स्रोत पर उपलब्ध सूची या स्कोरकार्ड को ही मान्य मानें। किसी भी अनधिकृत लिंक या अफवाह से बचें।</p>
 <ul>
   <li><strong>व्यक्तिगत विवरण जांचें:</strong> स्कोरकार्ड या सूची में नाम, रोल नंबर, श्रेणी और प्राप्तांक/स्थिति का मिलान करें।</li>
   <li><strong>अगले चरण की तैयारी:</strong> चयन या शॉर्टलिस्ट होने पर दस्तावेज़ सत्यापन (DV), साक्षात्कार या अगले चरण के निर्देश पढ़ें।</li>
   <li><strong>रिकॉर्ड सुरक्षित रखें:</strong> स्कोरकार्ड या मेरिट से जुड़ी प्रति को भविष्य के संदर्भ के लिए सेव कर लें।</li>
 </ul>
-
 <h2>परिणाम कैसे चेक करें?</h2>
-<p>मोबाइल या कंप्यूटर से परिणाम देखने के लिए नीचे दिए गए सरल चरणों का पालन करें:</p>
 <ol>
   <li>आधिकारिक पोर्टल या इस लेख में दिए गए संबंधित लिंक पर जाएं।</li>
   <li><strong>{raw_title}</strong> से जुड़े रिजल्ट या मेरिट लिंक को खोलें।</li>
@@ -820,16 +746,13 @@ def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, st
     elif stage == "Admit Card":
         stage_body = f"""
 <h2>एडमिट कार्ड और परीक्षा निर्देश</h2>
-<p><strong>{short_org}</strong> के इस <strong>Admit Card</strong> अपडेट के अंतर्गत उम्मीदवारों को परीक्षा तिथि, शिफ्ट, परीक्षा केंद्र और आवश्यक निर्देशों से जुड़ी जानकारी मिलती है। एडमिट कार्ड डाउनलोड करने से पहले लॉगिन विवरण तैयार रखें।</p>
-<p>परीक्षा केंद्र पर जाने से पहले प्रवेश पत्र में दर्ज विवरणों की जांच करें और निर्धारित समय से पहले केंद्र पर पहुंचने की योजना बनाएं।</p>
+<p><strong>{short_org}</strong> के इस <strong>Admit Card</strong> अपडेट के अंतर्गत उम्मीदवारों को परीक्षा तिथि, शिफ्ट, परीक्षा केंद्र और आवश्यक निर्देशों से जुड़ी जानकारी मिलती है।</p>
 <ul>
   <li><strong>विवरणों का मिलान:</strong> नाम, फोटो, हस्ताक्षर, परीक्षा केंद्र और रिपोर्टिंग समय ध्यान से देखें।</li>
   <li><strong>आवश्यक सामग्री:</strong> एडमिट कार्ड का प्रिंट, वैध मूल फोटो पहचान पत्र और निर्देशानुसार दस्तावेज़ साथ रखें।</li>
   <li><strong>प्रतिबंधित वस्तुएं:</strong> परीक्षा कक्ष में निषिद्ध सामग्री ले जाने से बचें और नियमों का पालन करें।</li>
 </ul>
-
 <h2>एडमिट कार्ड कैसे डाउनलोड करें?</h2>
-<p>प्रवेश पत्र डाउनलोड करने के लिए नीचे दिए गए चरण देखें:</p>
 <ol>
   <li>आधिकारिक लिंक खोलें और एडमिट कार्ड / लॉगिन अनुभाग पर जाएं।</li>
   <li>अपना रजिस्ट्रेशन/आवेदन नंबर और जन्मतिथि या पासवर्ड दर्ज करें।</li>
@@ -840,16 +763,13 @@ def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, st
     elif stage == "Answer Key":
         stage_body = f"""
 <h2>आंसर की और उत्तर मिलान की जानकारी</h2>
-<p><strong>{short_org}</strong> से जुड़े इस <strong>Answer Key</strong> अपडेट की मदद से उम्मीदवार अपनी परीक्षा के संभावित अंकों का अनुमान लगा सकते हैं। उत्तर मिलान करते समय प्रश्न सेट, शिफ्ट और मार्किंग नियमों का ध्यान रखना जरूरी है।</p>
-<p>यदि संबंधित सूचना में आपत्ति (Objection) दर्ज करने का प्रावधान दिया गया है, तो निर्धारित समय-सीमा और नियमों के अनुसार ही कदम उठाएं।</p>
+<p><strong>{short_org}</strong> से जुड़े इस <strong>Answer Key</strong> अपडेट की मदद से उम्मीदवार अपनी परीक्षा के संभावित अंकों का अनुमान लगा सकते हैं।</p>
 <ul>
   <li><strong>सही मिलान:</strong> प्रश्न संख्या या प्रश्न आईडी के अनुसार उत्तरों का मिलान करें।</li>
   <li><strong>अंक गणना:</strong> सही उत्तर और नेगेटिव मार्किंग (यदि लागू हो) के नियमों को ध्यान में रखें।</li>
   <li><strong>आपत्ति विंडो:</strong> किसी प्रश्न पर आपत्ति होने पर अंतिम तिथि से पहले आधिकारिक माध्यम से प्रक्रिया पूरी करें।</li>
 </ul>
-
 <h2>आंसर की कैसे देखें?</h2>
-<p>आंसर की या उससे जुड़ी सूचना देखने के लिए नीचे दिए गए चरण अपनाएं:</p>
 <ol>
   <li>आधिकारिक पोर्टल या नीचे दिए गए संबंधित लिंक पर क्लिक करें।</li>
   <li><strong>{raw_title}</strong> से जुड़ा सेक्शन या पीडीएफ खोलें।</li>
@@ -859,16 +779,13 @@ def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, st
     else:
         stage_body = f"""
 <h2>भर्ती और आवेदन से जुड़ी मुख्य बातें</h2>
-<p><strong>{short_org}</strong> के इस <strong>Jobs</strong> अपडेट के माध्यम से उम्मीदवारों को भर्ती, पद, पात्रता और आवेदन से जुड़ी महत्वपूर्ण जानकारी मिलती है। आवेदन करने से पहले आधिकारिक अधिसूचना को पूरा पढ़ना सबसे जरूरी है।</p>
-<p>अंतिम तिथि के समय वेबसाइट पर ट्रैफिक बढ़ सकता है, इसलिए पात्रता सुनिश्चित करने के बाद समय रहते आवेदन प्रक्रिया पूरी करना उचित रहता है।</p>
+<p><strong>{short_org}</strong> के इस <strong>Jobs</strong> अपडेट के माध्यम से उम्मीदवारों को भर्ती, पद, पात्रता और आवेदन से जुड़ी महत्वपूर्ण जानकारी मिलती है।</p>
 <ul>
   <li><strong>पात्रता की जांच:</strong> शैक्षणिक योग्यता, आयु सीमा और अनुभव (यदि लागू हो) की शर्तें मिलाएं।</li>
   <li><strong>दस्तावेज़ व फोटो:</strong> आवेदन से पहले आवश्यक प्रमाणपत्र, फोटो और हस्ताक्षर तैयार रखें।</li>
   <li><strong>फीस व सबमिशन:</strong> शुल्क भुगतान और अंतिम सबमिशन के बाद कन्फर्मेशन प्रति सुरक्षित रखें।</li>
 </ul>
-
 <h2>आवेदन कैसे करें?</h2>
-<p>ऑनलाइन आवेदन प्रक्रिया को सही तरीके से पूरा करने के लिए नीचे दिए गए चरण देखें:</p>
 <ol>
   <li>आधिकारिक वेबसाइट (<a href="{portal_url}" target="_blank" rel="noopener noreferrer">{portal_url}</a>) या संबंधित लिंक पर जाएं।</li>
   <li>नोटिफिकेशन में दिए गए निर्देशों के अनुसार रजिस्ट्रेशन करें।</li>
@@ -883,42 +800,22 @@ def build_stage_core_html(portal_info: dict, raw_title: str, target_url: str, st
             f"<li><strong>{clean_text(h)}:</strong> आधिकारिक सूचना का यह हिस्सा उम्मीदवारों के लिए महत्वपूर्ण नियम व विवरण दर्शाता है।</li>"
             for h in details["headings"][:5]
         )
-        headings_section = f"""
-<h2>आधिकारिक सूचना के प्रमुख खंड</h2>
-<p>मूल दस्तावेज़ या पेज में पाए गए प्रमुख अनुभाग नीचे दिए गए हैं ताकि आपको विस्तृत जानकारी ढूंढने में आसानी हो:</p>
-<ul>
-  {h_bullets}
-</ul>
-"""
+        headings_section = f"<h2>आधिकारिक सूचना के प्रमुख खंड</h2><ul>{h_bullets}</ul>"
 
     links_and_faq = f"""
 {headings_section}
 <h2>महत्वपूर्ण लिंक्स</h2>
 <table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
   <tbody>
-    <tr>
-      <td><strong>संबंधित आधिकारिक लिंक / सूचना</strong></td>
-      <td><a href="{target_url}" target="_blank" rel="noopener noreferrer">आधिकारिक लिंक खोलें</a></td>
-    </tr>
-    <tr>
-      <td><strong>आधिकारिक वेबसाइट ({short_org})</strong></td>
-      <td><a href="{portal_url}" target="_blank" rel="noopener noreferrer">{org}</a></td>
-    </tr>
+    <tr><td><strong>संबंधित आधिकारिक लिंक / सूचना</strong></td><td><a href="{target_url}" target="_blank" rel="noopener noreferrer">आधिकारिक लिंक खोलें</a></td></tr>
+    <tr><td><strong>आधिकारिक वेबसाइट ({short_org})</strong></td><td><a href="{portal_url}" target="_blank" rel="noopener noreferrer">{org}</a></td></tr>
   </tbody>
 </table>
-
 <h2>अक्सर पूछे जाने वाले प्रश्न (FAQs)</h2>
 <p><strong>प्रश्न 1: इस {stage} अपडेट की आधिकारिक पुष्टि कहाँ से करें?</strong><br>
-उत्तर: इस अपडेट की सबसे प्रामाणिक और अंतिम पुष्टि <strong>{org}</strong> की आधिकारिक वेबसाइट (<a href="{portal_url}" target="_blank" rel="noopener noreferrer">{portal_url}</a>) और संबंधित आधिकारिक सूचना से ही करें।</p>
-
+उत्तर: इस अपडेट की सबसे प्रामाणिक और अंतिम पुष्टि <strong>{org}</strong> की आधिकारिक वेबसाइट (<a href="{portal_url}" target="_blank" rel="noopener noreferrer">{portal_url}</a>) से ही करें।</p>
 <p><strong>प्रश्न 2: क्या इस पोस्ट में आगे भी बदलाव किया जा सकता है?</strong><br>
-उत्तर: हाँ, यदि इस भर्ती या परीक्षा से जुड़ा नया चरण, तिथि या लिंक सामने आता है, तो उसी पोस्ट को ताज़ा स्थिति और <strong>Last Updated</strong> समय के साथ अपडेट किया जाता है।</p>
-
-<p><strong>प्रश्न 3: लिंक खुलने में देरी हो या सर्वर स्लो चले तो क्या करें?</strong><br>
-उत्तर: पोर्टल पर अधिक लोड होने पर पेज खुलने में समय लग सकता है। ऐसे में कुछ समय बाद पुनः प्रयास करें और इंटरनेट कनेक्शन जांचें।</p>
-
-<p><strong>प्रश्न 4: क्या केवल इस लेख के आधार पर अंतिम निर्णय लेना चाहिए?</strong><br>
-उत्तर: यह लेख उम्मीदवारों की सुविधा के लिए तैयार किया गया है; आवेदन, परीक्षा, आपत्ति या परिणाम से जुड़ा अंतिम निर्णय हमेशा आधिकारिक अधिसूचना के अनुसार ही लें।</p>
+उत्तर: हाँ, नया चरण, तिथि या लिंक आने पर इसी पोस्ट को ताज़ा स्थिति और <strong>Last Updated</strong> समय के साथ अपडेट किया जाता है।</p>
 """
 
     return f"""<p><strong>{raw_title}</strong> से जुड़ा यह अपडेट <strong>{org}</strong> के आधिकारिक स्रोत से प्राप्त किया गया है। यह लेख <strong>{stage}</strong> श्रेणी के अंतर्गत तैयार किया गया है ताकि उम्मीदवारों को मुख्य बिंदु, नियम और आधिकारिक लिंक एक ही स्थान पर स्पष्ट रूप से मिल सकें।</p>
@@ -935,7 +832,6 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
         f"""
 <h2>उम्मीदवारों के लिए व्यावहारिक तैयारी और सावधानियां</h2>
 <p>सरकारी परीक्षाओं और भर्तियों की प्रक्रिया में सही समय पर सही जानकारी होना बहुत बड़ा अंतर पैदा करता है। <strong>{short_org}</strong> से जुड़े इस <strong>{stage}</strong> अपडेट के दौरान उम्मीदवारों को जल्दबाजी के बजाय व्यवस्थित तरीके से आगे बढ़ना चाहिए।</p>
-<p>अक्सर अभ्यर्थी किसी एक सूचना को पढ़कर बाकी नियमों को नज़रअंदाज़ कर देते हैं, जिससे आगे चलकर फॉर्म रिजेक्शन, लॉगिन समस्या या दस्तावेज़ मिलान में कठिनाई होती है। इसलिए हर निर्देश को शांत मन से पढ़ना और समझना बेहद ज़रूरी है।</p>
 <ul>
   <li><strong>सही विवरण दर्ज करें:</strong> नाम, जन्मतिथि, श्रेणी और रजिस्ट्रेशन नंबर जैसी जानकारी में अंतर न होने दें।</li>
   <li><strong>आधिकारिक स्रोतों पर भरोसा करें:</strong> अनौपचारिक समूहों या अधूरी पोस्ट्स के बजाय केवल आधिकारिक पोर्टल के निर्देश मानें।</li>
@@ -945,7 +841,6 @@ def ensure_minimum_words(html_content: str, portal_info: dict, raw_title: str, s
         f"""
 <h2>समय प्रबंधन और आगे के चरणों की योजना</h2>
 <p>चाहे आप आवेदन कर रहे हों, परीक्षा की तैयारी कर रहे हों, उत्तर कुंजी मिला रहे हों या परिणाम व अगले राउंड की प्रतीक्षा कर रहे हों—एक स्पष्ट योजना आपकी तैयारी को मजबूत बनाती है। <strong>{org}</strong> की प्रक्रिया में प्रत्येक चरण के लिए तय नियम और समय-सीमा निर्धारित होती है।</p>
-<p>यदि किसी चरण में दस्तावेज़ सत्यापन, कौशल परीक्षण, शारीरिक मापदंड या साक्षात्कार शामिल है, तो उसके लिए आवश्यक प्रमाणपत्र पहले से तैयार रखना समझदारी भरा कदम है। इससे अंतिम समय की भागदौड़ से बचा जा सकता है।</p>
 <ul>
   <li><strong>नियमित जांच:</strong> आधिकारिक वेबसाइट पर आने वाले नए नोटिस, संशोधनों या शेड्यूल पर नज़र रखें।</li>
   <li><strong>स्पष्ट नोट्स बनाएं:</strong> महत्वपूर्ण तिथियां, रजिस्ट्रेशन विवरण और निर्देश एक जगह नोट रखें।</li>
@@ -1002,8 +897,7 @@ def build_complete_article(
 नियम:
 - केवल शुद्ध HTML (`<h2>`, `<h3>`, `<p>`, `<ul>`, `<ol>`, `<table>`, `<tr>`, `<td>`, `<strong>`, `<a>`) दें, markdown ``` न लगाएं।
 - पैराग्राफ छोटे और स्पष्ट रखें, साथ में बुलेट पॉइंट्स और टेबल बनाए रखें।
-- बिना किसी आधार के कोई काल्पनिक तारीख, पद संख्या या दावा न जोड़ें; जो तथ्य उपलब्ध नहीं हैं, वहाँ "आधिकारिक सूचना के अनुसार" लिखें।
-- {stage} चरण की जानकारी को स्पष्ट व व्यवस्थित रखें।
+- बिना किसी आधार के कोई काल्पनिक तारीख, पद संख्या या दावा न जोड़ें।
 
 शीर्षक: {seo_title}
 विभाग: {portal_info['org']}
@@ -1020,9 +914,8 @@ def build_complete_article(
     final_html = ensure_minimum_words(base_html, portal_info, raw_title, stage, CONFIG["min_words"])
     return seo_title, final_html, count_words_from_html(final_html)
 
-
 # ==============================================================================
-# 7. WORDPRESS पब्लिश व लाइव अपडेट (DRAFT BY DEFAULT FOR YOUR REVIEW)
+# 7. WORDPRESS पब्लिश व लाइव अपडेट (DRAFT BY DEFAULT)
 # ==============================================================================
 def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tuple[bool, int, str]:
     preview_file = os.path.join(CONFIG["cache_dir"], "last_generated_article.html")
@@ -1031,7 +924,7 @@ def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tup
 
     if not (CONFIG["wp_site_url"] and CONFIG["wp_username"] and CONFIG["wp_app_password"]):
         sim_id = wp_post_id if wp_post_id > 0 else int(hashlib.md5(title.encode("utf-8")).hexdigest()[:6], 16)
-        print(f"   [DRY-RUN WP] {'UPDATE' if wp_post_id > 0 else 'CREATE'} -> {title} ({count_words_from_html(html_content)} words)")
+        print(f"   [DRY-RUN WP] {'UPDATE' if wp_post_id > 0 else 'CREATE'} -> {title}")
         return True, sim_id, f"{CONFIG['wp_site_url']}/?p={sim_id}"
 
     clean_pass = CONFIG["wp_app_password"].replace(" ", "")
@@ -1043,11 +936,7 @@ def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tup
     }
 
     status_to_use = CONFIG["wp_post_status"] if CONFIG["wp_post_status"] in ("draft", "publish", "pending", "private") else "draft"
-    payload = {
-        "title": title,
-        "content": html_content,
-        "status": status_to_use,
-    }
+    payload = {"title": title, "content": html_content, "status": status_to_use}
 
     base_endpoint = f"{CONFIG['wp_site_url']}/wp-json/wp/v2/posts"
     endpoint = f"{base_endpoint}/{wp_post_id}" if wp_post_id > 0 else base_endpoint
@@ -1056,13 +945,10 @@ def push_to_wordpress(title: str, html_content: str, wp_post_id: int = 0) -> tup
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=25)
         resp.raise_for_status()
         data = resp.json()
-        post_id = int(data.get("id") or wp_post_id or 0)
-        post_link = str(data.get("link") or "")
-        return True, post_id, post_link
+        return True, int(data.get("id") or wp_post_id or 0), str(data.get("link") or "")
     except Exception as e:
-        print(f"   [WP ERROR] '{title}' पब्लिश/अपडेट करने में त्रुटि: {e}")
+        print(f"   [WP ERROR] '{title}': {e}")
         return False, wp_post_id, ""
-
 
 # ==============================================================================
 # 8. मुख्य निष्पादन चक्र
@@ -1103,15 +989,10 @@ def fetch_portal_candidates(portal_info: dict) -> list[dict]:
                 notice_sig = build_notice_signature(short_org, title, full_url)
 
                 candidates.append({
-                    "notice_sig": notice_sig,
-                    "topic_key": topic_key,
-                    "portal_url": portal_url,
-                    "org": portal_info["org"],
-                    "short_org": short_org,
-                    "title": title,
-                    "target_url": full_url,
-                    "stage": stage,
-                    "fallback_dt": None,
+                    "notice_sig": notice_sig, "topic_key": topic_key,
+                    "portal_url": portal_url, "org": portal_info["org"],
+                    "short_org": short_org, "title": title,
+                    "target_url": full_url, "stage": stage, "fallback_dt": None,
                 })
 
                 if len(candidates) >= CONFIG["max_items_per_portal"]:
@@ -1122,7 +1003,6 @@ def fetch_portal_candidates(portal_info: dict) -> list[dict]:
     if not candidates:
         fallback_items = fetch_fallback_updates(portal_info)
         if fallback_items:
-            print(f"   [FALLBACK ACTIVE] {short_org}: बैकअप सोर्स से {len(fallback_items)} अपडेट मिले")
             candidates.extend(fallback_items)
 
     return candidates
@@ -1134,9 +1014,8 @@ def run_writer_pipeline() -> None:
     boot_cutoff_dt, is_first_boot = get_or_lock_boot_time(boot_now_dt)
 
     print("=" * 72)
-    print(f"{CONFIG['site_name']} Content Writer Engine (From-Boot-Cutoff Mode)")
-    print(f"रन समय (IST): {now_ist_str()} | बोट कटऑफ: {boot_cutoff_dt.strftime('%d-%m-%Y %H:%M IST')} के बाद")
-    print(f"स्टेटस: {CONFIG['wp_post_status']} | न्यूनतम शब्द: {CONFIG['min_words']}")
+    print(f"{CONFIG['site_name']} Engine | Mode: {'FIRST BOOT (BASELINE LOCK)' if is_first_boot else 'LIVE SCAN MODE'}")
+    print(f"रन समय (IST): {now_ist_str()} | बोट कटऑफ: {boot_cutoff_dt.strftime('%d-%m-%Y %H:%M IST')}")
     print("=" * 72)
 
     new_created = 0
@@ -1145,13 +1024,11 @@ def run_writer_pipeline() -> None:
 
     for idx, portal in enumerate(GOVT_PORTALS, start=1):
         candidates = fetch_portal_candidates(portal)
-        print(f"[{idx:02d}/{len(GOVT_PORTALS)}] {portal['short_org']}: {len(candidates)} संभावित अपडेट मिले")
+        print(f"[{idx:02d}/{len(GOVT_PORTALS)}] {portal['short_org']}: {len(candidates)} आइटम जांचे गए")
 
-        # पहली बार बोट चालू होते ही उस समय से पहले मौजूद सभी आइटम्स को baseline_snapshot में लॉक करें
         if is_first_boot:
             for item in candidates:
                 add_to_baseline_snapshot(item["notice_sig"], item["portal_url"], item["title"], item["target_url"])
-            print(f"   [BASELINE LOCKED] {portal['short_org']}: बोट चालू होने से पहले के {len(candidates)} आइटम्स लॉक किए गए")
             continue
 
         for item in candidates:
@@ -1171,7 +1048,6 @@ def run_writer_pipeline() -> None:
             if existing is None:
                 eligible, reason = is_arrived_after_boot(details, notice_sig, boot_cutoff_dt)
                 if not eligible:
-                    print(f"   [SKIP PRE-BOOT] {item['title'][:50]}... -> {reason}")
                     skipped_items += 1
                     continue
 
@@ -1194,22 +1070,15 @@ def run_writer_pipeline() -> None:
                 if ok:
                     now_str = now_ist_str()
                     upsert_article_record({
-                        "topic_key": topic_key,
-                        "portal_url": item["portal_url"],
-                        "short_org": item["short_org"],
-                        "raw_title": item["title"],
-                        "seo_title": seo_title,
-                        "stage": item["stage"],
-                        "stages_history": history,
-                        "target_url": item["target_url"],
-                        "content_hash": content_hash,
-                        "word_count": wc,
-                        "wp_post_id": wp_id,
-                        "created_at": now_str,
-                        "updated_at": now_str,
+                        "topic_key": topic_key, "portal_url": item["portal_url"],
+                        "short_org": item["short_org"], "raw_title": item["title"],
+                        "seo_title": seo_title, "stage": item["stage"],
+                        "stages_history": history, "target_url": item["target_url"],
+                        "content_hash": content_hash, "word_count": wc,
+                        "wp_post_id": wp_id, "created_at": now_str, "updated_at": now_str,
                     })
                     new_created += 1
-                    print(f"   [NEW ARTICLE] [{item['stage']}] ({wc} words) -> {seo_title}")
+                    print(f"   [NEW DRAFT] [{item['stage']}] ({wc} words) -> {seo_title}")
 
             else:
                 stage_changed = existing["stage"] != item["stage"]
@@ -1246,16 +1115,11 @@ def run_writer_pipeline() -> None:
                 if ok:
                     now_str = now_ist_str()
                     upsert_article_record({
-                        "topic_key": topic_key,
-                        "portal_url": item["portal_url"],
-                        "short_org": item["short_org"],
-                        "raw_title": item["title"],
-                        "seo_title": seo_title,
-                        "stage": item["stage"],
-                        "stages_history": history,
-                        "target_url": item["target_url"],
-                        "content_hash": content_hash,
-                        "word_count": wc,
+                        "topic_key": topic_key, "portal_url": item["portal_url"],
+                        "short_org": item["short_org"], "raw_title": item["title"],
+                        "seo_title": seo_title, "stage": item["stage"],
+                        "stages_history": history, "target_url": item["target_url"],
+                        "content_hash": content_hash, "word_count": wc,
                         "wp_post_id": wp_id or existing.get("wp_post_id", 0),
                         "created_at": existing.get("created_at") or now_str,
                         "updated_at": now_str,
@@ -1264,6 +1128,10 @@ def run_writer_pipeline() -> None:
                     print(f"   [LIVE UPDATE] [{existing['stage']} -> {item['stage']}] ({wc} words) -> {seo_title}")
 
     print("-" * 72)
+    if is_first_boot:
+        print("पहला रन पूरा: पुराना डाटा लॉक कर दिया गया है। अगले रन से नए अपडेट्स पर ड्राफ्ट बनेंगे।")
+    elif new_created == 0 and live_updated == 0:
+        print("अभी कोई अपडेट नहीं आया")
     print(f"पूरा हुआ -> नए आर्टिकल: {new_created} | लाइव अपडेट: {live_updated} | स्किप: {skipped_items}")
     print("=" * 72)
 
