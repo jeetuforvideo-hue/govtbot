@@ -120,15 +120,23 @@ GOVT_PORTALS = [
 STAGE_KEYWORDS = {
     "Result": [
         "result", "results", "merit list", "scorecard", "score card", "shortlisted",
-        "selected candidates", "cut off", "cutoff", "final result", "रिजल्ट", "परिणाम", "मेरिट"
+        "selected candidates", "cut off", "cutoff", "final result", "रिजल्ट", "परिणाम", "मेरिट", "चयन सूची"
     ],
     "Answer Key": [
         "answer key", "ans key", "response sheet", "objection", "provisional key",
-        "final key", "आंसर की", "उत्तर कुंजी"
+        "final key", "master question paper", "आंसर की", "उत्तर कुंजी", "आपत्ति"
+    ],
+    "City Slip": [
+        "city intimation", "city slip", "exam city", "intimation slip", "advance city",
+        "allotment of exam city", "सिटी स्लिप", "एग्जाम सिटी", "परीक्षा शहर", "शहर आवंटन", "शहर सूचना", "किस शहर में होगा"
     ],
     "Admit Card": [
-        "admit card", "hall ticket", "call letter", "exam city", "city intimation",
-        "admission certificate", "एडमिट कार्ड", "प्रवेश पत्र"
+        "admit card", "hall ticket", "call letter", "admission certificate",
+        "download admit card", "प्रवेश पत्र", "हॉल टिकट", "एडमिट कार्ड"
+    ],
+    "Exam Date": [
+        "exam date", "examination date", "exam schedule", "time table", "date sheet",
+        "tentative calendar", "revised schedule", "परीक्षा तिथि", "परीक्षा कार्यक्रम", "टाइम टेबल"
     ],
     "Jobs": [
         "recruitment", "vacancy", "vacancies", "notification", "advertisement", "advt",
@@ -330,7 +338,7 @@ def upsert_article_record(record: dict) -> None:
 
 
 # ==============================================================================
-# 4. TEXT CLEANING, STAGE & STRICT TOPIC KEY
+# 4. TEXT CLEANING, ACCURATE STAGES & CANONICAL EXAMS
 # ==============================================================================
 def clean_text(text: str) -> str:
     if not text:
@@ -348,19 +356,44 @@ def count_words_from_html(html_content: str) -> int:
 
 def detect_stage(text: str) -> str:
     low = (text or "").lower()
-    for stage in ["Result", "Answer Key", "Admit Card", "Jobs"]:
-        if any(kw in low for kw in STAGE_KEYWORDS[stage]):
-            return stage
+    # 1. Result & Merit List
+    if any(kw in low for kw in STAGE_KEYWORDS["Result"]):
+        return "Result"
+    # 2. Answer Key & Objections
+    if any(kw in low for kw in STAGE_KEYWORDS["Answer Key"]):
+        return "Answer Key"
+    # 3. City Slip (Checked BEFORE Admit Card so City Slip is NEVER mistaken for Admit Card!)
+    if any(kw in low for kw in STAGE_KEYWORDS["City Slip"]):
+        return "City Slip"
+    # 4. Admit Card (Only if actual admit card, not just announcement of date/schedule)
+    if any(kw in low for kw in STAGE_KEYWORDS["Admit Card"]) and not any(kw in low for kw in ["admit card date", "admit card soon", "एडमिट कार्ड की डेट"]):
+        return "Admit Card"
+    # 5. Exam Date & Schedule
+    if any(kw in low for kw in STAGE_KEYWORDS["Exam Date"]):
+        return "Exam Date"
+    # 6. Default Jobs
     return "Jobs"
 
 
 EXAM_CANONICAL_PATTERNS = [
+    # Rajasthan RSSB / RPSC
+    (r"\b(cet|common\s+eligibility\s+test)\b", "cet", "CET"),
+    (r"\b(patwar|patwari)\b", "patwari", "Patwari"),
+    (r"\b(vdo|gram\s*sevak|village\s*development)\b", "vdo", "VDO"),
+    (r"\b(reet|rajasthan\s+eligibility\s+examination)\b", "reet", "REET"),
+    (r"\b(ras|rajasthan\s+administrative\s+services)\b", "ras", "RAS"),
+    (r"\b(lab\s*assistant|prayogshala)\b", "lab_assistant", "Lab Assistant"),
+    (r"\b(junior\s*accountant|kanisht\s*lekha)\b", "junior_accountant", "Junior Accountant"),
+    (r"\b(animal\s*attendant|pashu\s*paricharak)\b", "animal_attendant", "Animal Attendant"),
+    (r"\b(agriculture\s*supervisor|krishi\s*paryavekshak)\b", "agriculture_supervisor", "Agriculture Supervisor"),
+    (r"\b(rajasthan\s*police|raj\s*police)\b", "rajasthan_police", "Rajasthan Police"),
     # SSC
     (r"\b(cgl|combined\s+graduate\s+level)\b", "cgl", "CGL"),
     (r"\b(chsl|combined\s+higher\s+secondary|10\+2)\b", "chsl", "CHSL"),
     (r"\b(mts|multi\s*tasking|havaldar)\b", "mts", "MTS"),
     (r"\b(cpo|sub\s*inspector\s+in\s+delhi\s+police|capfs)\b", "cpo", "CPO"),
     (r"\b(constable\s+gd|general\s+duty|rifleman)\b", "gd_constable", "GD Constable"),
+    (r"\b(delhi\s*police\s*constable|delhi\s*police\s*hc)\b", "delhi_police_constable", "Delhi Police Constable"),
     (r"\b(je|junior\s+engineer)\b", "je", "Junior Engineer (JE)"),
     (r"\b(stenographer|steno\s*grade\s*[cd])\b", "steno", "Stenographer"),
     (r"\b(selection\s+post|phase\s*[\-\s]*\d{1,2})\b", "selection_post", "Selection Post"),
@@ -372,31 +405,29 @@ EXAM_CANONICAL_PATTERNS = [
     (r"\b(cms|combined\s+medical)\b", "cms", "CMS"),
     (r"\b(ese|engineering\s+services)\b", "ese", "ESE"),
     # Railways / RRB
-    (r"\b(alp|assistant\s+loco\s+pilot)\b", "rrb_alp", "RRB ALP"),
-    (r"\b(ntpc|non\s*technical\s+popular\s+categories)\b", "rrb_ntpc", "RRB NTPC"),
-    (r"\b(group\s*d|level\s*1\s*posts?)\b", "rrb_group_d", "RRB Group D"),
-    (r"\b(technician|technician\s+grade)\b", "rrb_technician", "RRB Technician"),
+    (r"\b(alp|assistant\s+loco\s+pilot)\b", "rrb_alp", "ALP"),
+    (r"\b(ntpc|non\s*technical\s+popular\s+categories)\b", "rrb_ntpc", "NTPC"),
+    (r"\b(group\s*d|level\s*1\s*posts?)\b", "rrb_group_d", "Group D"),
+    (r"\b(technician|technician\s+grade)\b", "rrb_technician", "Technician"),
+    (r"\b(nursing\s*superintendent|nursing\s*officer)\b", "nursing_officer", "Nursing Officer"),
+    (r"\b(paramedical)\b", "paramedical", "Paramedical"),
     (r"\b(rpf\s+si|rpf\s+constable|railway\s+protection\s+force)\b", "rpf", "RPF"),
     # Banking
     (r"\b(po|probationary\s+officer)\b", "po", "PO"),
     (r"\b(clerk|customer\s+support|clerical)\b", "clerk", "Clerk"),
     (r"\b(so|specialist\s+officer)\b", "so", "SO"),
-    # Teaching
+    # Teaching & NTA
     (r"\b(ctet|central\s+teacher\s+eligibility)\b", "ctet", "CTET"),
     (r"\b(kvs|kendriya\s+vidyalaya)\b", "kvs", "KVS"),
     (r"\b(nvs|navodaya\s+vidyalaya)\b", "nvs", "NVS"),
-    (r"\b(prt|primary\s+teacher)\b", "prt", "PRT"),
-    (r"\b(tgt|trained\s+graduate\s+teacher)\b", "tgt", "TGT"),
-    (r"\b(pgt|post\s+graduate\s+teacher)\b", "pgt", "PGT"),
-    # Defence
-    (r"\b(agniveer\s+vayu|air\s*force|casb)\b", "airforce_agniveer", "Air Force Agniveer"),
-    (r"\b(agniveer\s+navy|ssr|mr)\b", "navy_agniveer", "Navy Agniveer"),
-    (r"\b(agniveer\s+army|rally)\b", "army_agniveer", "Army Agniveer"),
-    (r"\b(coast\s*guard|navik|yantrik)\b", "coast_guard", "Coast Guard"),
-    # Police
-    (r"\b(police\s+constable|sipahi)\b", "police_constable", "Police Constable"),
-    (r"\b(sub\s*inspector|daroga|si)\b", "police_si", "Police SI"),
-    (r"\b(patwari|lekhpal)\b", "lekhpal", "Lekhpal / Patwari"),
+    (r"\b(ugc\s*net|csir\s*net)\b", "ugc_net", "UGC NET"),
+    # State Police & PSC
+    (r"\b(uppsc\s*pcs|up\s*pcs)\b", "uppsc_pcs", "UPPSC PCS"),
+    (r"\b(ro\s*aro|samiksha\s*adhikari)\b", "ro_aro", "RO / ARO"),
+    (r"\b(up\s*police\s*constable|upp\s*constable)\b", "up_police_constable", "UP Police Constable"),
+    (r"\b(up\s*police\s*si|upp\s*si)\b", "up_police_si", "UP Police SI"),
+    (r"\b(bpsc\s*cce|bpsc\s*civil)\b", "bpsc_cce", "BPSC CCE"),
+    (r"\b(bihar\s*police|bihar\s*daroga|bihar\s*si)\b", "bihar_police", "Bihar Police"),
 ]
 
 
@@ -406,28 +437,25 @@ def get_canonical_exam_info(title: str) -> tuple[str, str]:
         if re.search(pattern, low):
             return slug, label
 
+    # Remove ALL Hindi characters to ensure 100% clean English extraction
+    english_clean = re.sub(r'[\u0900-\u097f]+', ' ', low)
     noise = (
-        r"\b(admit\s*card|hall\s*ticket|call\s*letter|exam\s*city|city\s*intimation|"
+        r"\b(admit\s*card|hall\s*ticket|call\s*letter|exam\s*city|city\s*intimation|city\s*slip|"
         r"answer\s*key|ans\s*key|response\s*sheet|objection|provisional|final|"
         r"result|results|merit\s*list|scorecard|cut\s*off|cutoff|out|released|declared|"
         r"notification|recruitment|vacancy|vacancies|apply\s*online|bharti|"
         r"revised|corrigendum|schedule|notice|update|check|direct|link|paper|raise|"
         r"examination|exam|tier|phase|2020|2021|2022|2023|2024|2025|2026|2027)\b"
     )
-    stripped = re.sub(noise, " ", low, flags=re.IGNORECASE)
+    stripped = re.sub(noise, " ", english_clean, flags=re.IGNORECASE)
     stripped = re.sub(r"[^a-z0-9]+", " ", stripped)
     tokens = [t for t in stripped.split() if len(t) > 2][:3]
     slug = "_".join(tokens) if tokens else hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
-    label = " ".join(t.capitalize() for t in tokens) if tokens else slug
+    label = " ".join(t.upper() if len(t) <= 4 else t.capitalize() for t in tokens) if tokens else ""
     return slug, label
 
 
 def build_topic_key(short_org: str, title: str) -> str:
-    """
-    Creates a single canonical key per organization + exam + year.
-    All stages (Jobs, Admit Card, Answer Key, Result) share the exact SAME key,
-    ensuring 1 article is NEVER created 2 to 3 times!
-    """
     slug, _ = get_canonical_exam_info(title)
     yr = current_year_str()
     return f"{short_org.lower().strip()}_{slug}_{yr}"
@@ -611,20 +639,12 @@ def extract_timestamp_details(
 
 
 def is_notice_fresh_and_valid(title: str, details: dict, notice_sig: str, boot_cutoff_dt: datetime) -> tuple[bool, str]:
-    """
-    STRICT REAL-TIME FRESHNESS FILTER (MAX 3-4 HOURS OLD):
-    1. Rejects any pre-boot notice locked in baseline snapshot.
-    2. Rejects notices referencing past years (2020-2025) without current year.
-    3. Rejects notices older than CONFIG['max_notice_age_hours'] (Strictly 3-4 hours).
-    4. Rejects notices with unverifiable timestamps to guarantee zero old articles.
-    """
     if is_in_baseline_snapshot(notice_sig):
         return False, "Pre-boot notice locked in baseline snapshot"
 
     yr_current = current_year_str()
     sample_text = f"{title} {details.get('text_excerpt', '')[:600]}".lower()
 
-    # Past years filter: if notice references past years without current year
     past_years = ["2020", "2021", "2022", "2023", "2024", "2025"]
     for py in past_years:
         if re.search(r'\b' + py + r'\b', sample_text) and not re.search(r'\b' + yr_current + r'\b', sample_text):
@@ -633,8 +653,6 @@ def is_notice_fresh_and_valid(title: str, details: dict, notice_sig: str, boot_c
     det_dt = details.get("detected_dt")
     has_exact_time = bool(details.get("has_exact_time"))
     now_dt = now_ist_dt()
-
-    # Strict Real-time Cutoff (Default 4 hours)
     max_hours = float(CONFIG.get("max_notice_age_hours", 4.0))
 
     if det_dt is not None:
@@ -647,7 +665,6 @@ def is_notice_fresh_and_valid(title: str, details: dict, notice_sig: str, boot_c
         if not has_exact_time and det_dt.date() < boot_cutoff_dt.date():
             return False, f"Date earlier than bot boot date ({det_dt.strftime('%d-%m-%Y')})"
     else:
-        # If timestamp is completely unverifiable, do not risk publishing old content
         if not (yr_current in sample_text and re.search(r'\b(today|latest|current|breaking|hours? ago|आज|ताजा)\b', sample_text)):
             return False, "Unverifiable publication time and no real-time freshness signal - skipping for safety"
 
@@ -823,60 +840,86 @@ def extract_context_details(raw_title: str, target_url: str, portal_url: str, fa
 # ==============================================================================
 def build_clean_title(short_org: str, raw_title: str, stage: str, is_live_update: bool = False) -> str:
     yr = current_year_str()
-    txt = clean_text(raw_title)
-    txt = re.sub(r"\.pdf$|\.html$|\.aspx$", "", txt, flags=re.IGNORECASE)
-    txt = re.sub(
-        r"\b(out|released|declared|new|latest|click here|download|view|notice|notification|update|check|direct|link|paper|raise)\b",
-        " ",
-        txt,
-        flags=re.IGNORECASE,
-    )
+    slug, label = get_canonical_exam_info(raw_title)
 
-    stage_clean_patterns = {
-        "Result": r"\b(result|results|merit\s*list|scorecard|score\s*card|cut\s*off|cutoff)\b",
-        "Admit Card": r"\b(admit\s*card|hall\s*ticket|call\s*letter|exam\s*city)\b",
-        "Answer Key": r"\b(answer\s*key|ans\s*key|response\s*sheet|objection)\b",
-        "Jobs": r"\b(recruitment|vacancy|vacancies|apply\s*online|bharti)\b",
-    }
-    pat = stage_clean_patterns.get(stage)
-    if pat:
-        txt = re.sub(pat, " ", txt, flags=re.IGNORECASE)
+    # 1. Clean short_org: strictly English alphanumeric
+    clean_org = re.sub(r'[\u0900-\u097f]+', '', short_org).strip()
+    clean_org = re.sub(r'[^A-Za-z0-9\s\-]+', ' ', clean_org).strip()
+    if not clean_org:
+        clean_org = "Govt"
 
-    txt = re.sub(r"\b202[4-7]\b", " ", txt)
-    txt = re.sub(r"[^\w\s\u0900-\u097f\-/]+", " ", txt)
-    txt = re.sub(r"\s+", " ", txt).strip(" -–|:/")
+    # 2. Clean subject: prefer canonical English label
+    if label and label.lower() not in clean_org.lower():
+        subject = f"{clean_org} {label}".strip()
+    else:
+        # Fallback to extracting English words from raw_title
+        english_only = re.sub(r'[\u0900-\u097f]+', ' ', raw_title)
+        english_only = re.sub(
+            r'\b(out|released|declared|new|latest|click here|download|view|notice|notification|update|check|direct|link|paper|raise|admit\s*card|hall\s*ticket|result|scorecard|cut\s*off|answer\s*key|city\s*slip|city\s*intimation|exam\s*city|recruitment|vacancy|vacancies|apply\s*online|202[0-9])\b',
+            ' ',
+            english_only,
+            flags=re.IGNORECASE
+        )
+        english_words = [w for w in re.findall(r'[A-Za-z0-9]+', english_only) if len(w) > 1 and w.lower() not in {"the", "of", "for", "and", "in", "on", "to", "at", "by", "is", "a", "an", "all", "now"}][:3]
+        if english_words:
+            extracted_subj = " ".join(english_words).strip()
+            subject = f"{clean_org} {extracted_subj}".strip() if clean_org.lower() not in extracted_subj.lower() else extracted_subj
+        else:
+            subject = clean_org
 
-    words = []
-    for w in txt.split():
-        if w.lower() not in {"the", "of", "for", "and", "in", "on", "to"} and (not words or words[-1].lower() != w.lower()):
-            words.append(w)
+    # Safety: strip ANY accidental Hindi or special chars from subject
+    subject = re.sub(r'[\u0900-\u097f]+', '', subject)
+    subject = re.sub(r'\s+', ' ', subject).strip(' -–|:/')
 
-    subject = " ".join(words[:4]).strip()
-    if not subject:
-        subject = short_org
-    elif short_org.lower() not in subject.lower():
-        subject = f"{short_org} {subject}".strip()
-
-    subject = subject[:48].strip(" -–|:/")
-    prefix = "[Out] " if is_live_update else ""
-
-    if stage == "Result":
-        return f"{prefix}{subject} Result {yr}: Tier 1 Merit List PDF, Scorecard & Cut Off Marks Released"
+    # Strictly 100% English titles with ZERO [Out] or [Live] prefixes
+    if stage == "City Slip":
+        return f"{subject} Exam City Slip {yr}: District Center Location & Intimation PDF Link"
     if stage == "Admit Card":
-        return f"{prefix}{subject} Admit Card {yr}: Hall Ticket Download Link, Exam Shift Timing & Center Details"
+        return f"{subject} Admit Card {yr}: Hall Ticket Download Link, Shift Timing & Center Guidelines"
+    if stage == "Exam Date":
+        return f"{subject} Exam Date {yr}: Complete Schedule, Shift Timing & Official Notice PDF"
     if stage == "Answer Key":
-        return f"{prefix}{subject} Answer Key {yr}: Response Sheet PDF, Question Objection Link & Score Calculator"
+        return f"{subject} Answer Key {yr}: Response Sheet PDF, Question Objection Link & Score Calculator"
+    if stage == "Result":
+        return f"{subject} Result {yr}: Tier 1 Merit List PDF, Scorecard & Cut Off Marks Released"
     return f"{subject} Recruitment {yr}: Notification PDF, Eligibility Criteria, Total Vacancies & Apply Online Link"
 
 
 def build_seo_faq_schema(short_org: str, raw_title: str, stage: str, details: dict) -> str:
-    """
-    Google Rich Results FAQ Schema (JSON-LD) for high click-through-rates in Google Search.
-    """
     yr = current_year_str()
     faqs = []
 
-    if stage == "Admit Card":
+    if stage == "City Slip":
+        faqs = [
+            {
+                "@type": "Question",
+                "name": f"{short_org} {raw_title} Exam City Slip {yr} कैसे चेक करें?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": f"उम्मीदवार आधिकारिक पोर्टल पर जाकर अपने Registration Number और Date of Birth की मदद से लॉगिन करके अपना {short_org} Exam City Intimation Slip चेक कर सकते हैं।"
+                }
+            },
+            {
+                "@type": "Question",
+                "name": "क्या Exam City Slip से परीक्षा हॉल में प्रवेश मिल सकता है?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": "नहीं, Exam City Slip केवल परीक्षा शहर और जिले की अग्रिम जानकारी के लिए होती है ताकि यात्रा रिजर्वेशन कराया जा सके। परीक्षा हॉल में प्रवेश हेतु मुख्य Admit Card अनिवार्य होगा जो परीक्षा से 3-4 दिन पूर्व जारी किया जाएगा।"
+                }
+            }
+        ]
+    elif stage == "Exam Date":
+        faqs = [
+            {
+                "@type": "Question",
+                "name": f"{short_org} {raw_title} Exam {yr} कब आयोजित होगी?",
+                "acceptedAnswer": {
+                    "@type": "Answer",
+                    "text": f"आधिकारिक परीक्षा कार्यक्रम के अनुसार {short_org} द्वारा परीक्षा का आयोजन जारी किए गए विस्तृत शेड्यूल के अनुसार विभिन्न शिफ्टों में किया जाएगा।"
+                }
+            }
+        ]
+    elif stage == "Admit Card":
         faqs = [
             {
                 "@type": "Question",
@@ -964,31 +1007,36 @@ def build_human_master_article(
     is_live_update: bool = False,
     stages_history: list | None = None,
 ) -> str:
-    """
-    Crafts an authentic, 1200+ word comprehensive article written from the voice
-    of a seasoned Indian educational journalist & mentor.
-    Zero AI clichés (no 'निष्कर्ष', 'संक्षेप में', 'जैसा कि हम जानते हैं').
-    100% compliant with Google AdSense quality and E-E-A-T standards.
-    """
     org = portal_info.get("org") or portal_info.get("short_org") or "Government Organization"
     short_org = portal_info.get("short_org") or org
     portal_url = portal_info.get("portal_url") or portal_info.get("url") or CONFIG["wp_site_url"]
     official_notice_url = details.get("official_notice_link") or ""
     updated_now = now_ist_str()
     yr = current_year_str()
+    slug, canonical_label = get_canonical_exam_info(raw_title)
+    clean_exam_name = f"{canonical_label} Exam" if canonical_label else clean_text(re.sub(r'[\?\;\|\!]+', ' ', raw_title)[:60])
 
     # 1. LIVE UPDATE HERO BADGE (IF STAGE UPDATED)
     live_badge_html = ""
     if is_live_update:
         flow_chain = " &rarr; ".join(stages_history or [stage])
+        stage_display_names = {
+            "City Slip": "एग्जाम सिटी स्लिप (Exam City Slip)",
+            "Admit Card": "एडमिट कार्ड (Admit Card)",
+            "Exam Date": "परीक्षा कार्यक्रम (Exam Date)",
+            "Answer Key": "आंसर की (Answer Key)",
+            "Result": "परिणाम / मेरिट लिस्ट (Result)",
+            "Jobs": "भर्ती अधिसूचना (Notification)",
+        }
+        stage_label = stage_display_names.get(stage, stage)
         live_badge_html = f"""
 <div style="background-color: #f0f7ff; border-left: 5px solid #0b57d0; padding: 16px 20px; margin-bottom: 24px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
   <p style="margin: 0 0 6px 0; font-size: 17px; font-weight: bold; color: #0b57d0;">
-    ⚡ Live Update ({updated_now}): {short_org} {stage} आधिकारिक तौर पर जारी
+    ⚡ Live Update ({updated_now}): {short_org} {stage_label} आधिकारिक तौर पर जारी
   </p>
   <p style="margin: 0; font-size: 15px; color: #202124; line-height: 1.5;">
-    <strong>{org}</strong> द्वारा <strong>{raw_title}</strong> का <strong>{stage}</strong> पोर्टल पर लाइव कर दिया गया है। 
-    उम्मीदवार नीचे दी गई त्वरित तालिका (Quick Overview) से अपना स्टेटस, कट-ऑफ और आधिकारिक नोटिस सीधे देख सकते हैं। 
+    <strong>{org}</strong> द्वारा <strong>{clean_exam_name}</strong> का <strong>{stage_label}</strong> पोर्टल पर लाइव कर दिया गया है। 
+    उम्मीदवार नीचे दी गई त्वरित तालिका (Quick Overview) से अपना स्टेटस, विवरण और आधिकारिक नोटिस सीधे देख सकते हैं। 
     (भर्ती प्रगति: <strong>{flow_chain}</strong>)
   </p>
 </div>
@@ -996,8 +1044,8 @@ def build_human_master_article(
 
     # 2. QUICK OVERVIEW TABLE
     notice_row = (
-        f'<tr><td style="padding:10px;font-weight:600;">Official PDF / Notice Link</td>'
-        f'<td style="padding:10px;"><a href="{official_notice_url}" target="_blank" rel="noopener noreferrer" style="color:#0b57d0;font-weight:600;">Download Official Notice PDF</a></td></tr>'
+        f'<tr style="background:#e8f0fe;"><td style="padding:12px;font-weight:700;color:#1a73e8;">Official Notification PDF</td>'
+        f'<td style="padding:12px;"><a href="{official_notice_url}" target="_blank" rel="noopener noreferrer" style="background:#1a73e8;color:#ffffff;padding:8px 16px;border-radius:4px;text-decoration:none;font-weight:700;display:inline-block;">📥 Download Official Notice PDF</a></td></tr>'
         if official_notice_url
         else ""
     )
@@ -1025,7 +1073,78 @@ def build_human_master_article(
 """
 
     # 3. STAGE-SPECIFIC ACTIONABLE ADVICE & MENTORSHIP
-    if stage == "Admit Card":
+    if stage == "City Slip":
+        core_body = f"""
+<h2>Exam City Intimation Slip Overview (एग्जाम सिटी स्लिप और परीक्षा शहर आवंटन)</h2>
+<p><strong>{short_org}</strong> द्वारा <strong>{raw_title}</strong> के लिए आधिकारिक <strong>Exam City Intimation Slip (परीक्षा शहर सूचना पर्ची)</strong> जारी कर दी गई है। सभी पंजीकृत अभ्यर्थी बोर्ड के अधिकृत पोर्टल पर जाकर यह जांच सकते हैं कि उनकी परीक्षा किस जिले या शहर में आयोजित की जाएगी।</p>
+<p style="background:#e8f0fe;padding:12px 16px;border-left:4px solid #1a73e8;font-size:15px;border-radius:4px;">
+  <strong>अभ्यर्थियों के लिए अति आवश्यक सूचना:</strong> कृपया ध्यान दें कि यह केवल <strong>Exam City Slip</strong> है, मुख्य <strong>Admit Card</strong> नहीं। परीक्षा केंद्र (Exam Center) का सटीक नाम व पता, रोल नंबर और परीक्षा हॉल में ले जाने योग्य मूल एडमिट कार्ड परीक्षा तिथि से 3 से 4 दिन पूर्व अलग से जारी किया जाएगा।
+</p>
+
+<h2>Why City Slip is Issued Before Admit Card (सिटी स्लिप पहले जारी करने का उद्देश्य)</h2>
+<p>सरकारी भर्ती बोर्ड परीक्षा से लगभग 7 से 10 दिन पहले सिटी इंटिमेशन स्लिप इसलिए जारी करते हैं ताकि दूर-दराज के जिलों से आने वाले अभ्यर्थियों को निम्नलिखित सुविधाएं मिल सकें:</p>
+<ul style="line-height:1.8;font-size:15px;">
+  <li><strong>यात्रा की पूर्व तैयारी (Travel Reservation):</strong> अभ्यर्थी अपने आवंटित शहर के अनुसार ट्रेन, बस या अन्य वाहनों का रिजर्वेशन समय रहते करा सकें।</li>
+  <li><strong>रुकने की व्यवस्था (Accommodation):</strong> यदि परीक्षा सुबह की पहली शिफ्ट में है, तो अभ्यर्थी एक दिन पहले पहुंचकर ठहरने की व्यवस्था पहले से सुनिश्चित कर सकें।</li>
+  <li><strong>मानसिक तनाव से मुक्ति:</strong> अंतिम समय में परीक्षा केंद्र के शहर को लेकर होने वाली हड़बड़ाहट से बचा जा सके।</li>
+</ul>
+
+<h2>How to Check Exam City Slip Online (एग्जाम सिटी स्लिप चेक करने की आसान प्रक्रिया)</h2>
+<ol style="line-height:1.8;font-size:15px;">
+  <li>सबसे पहले ऊपर Quick Overview टेबल में दिए गए आधिकारिक वेबसाइट लिंक (<strong>{portal_url}</strong>) पर जाएं।</li>
+  <li>होमपेज पर उपलब्ध <strong>{raw_title} Exam City Slip / District Location</strong> के एक्टिव लिंक पर क्लिक करें।</li>
+  <li>अपना Application Number / Registration ID और Date of Birth (जन्म तिथि) अथवा पासवर्ड दर्ज करें।</li>
+  <li>स्क्रीन पर दिख रहे Captcha Code को सही-सही भरें और <strong>Submit / Check City</strong> पर क्लिक करें।</li>
+  <li>स्क्रीन पर आपकी परीक्षा तिथि, आवंटित शहर (District) और शिफ्ट का समय प्रदर्शित हो जाएगा। इसका स्क्रीनशॉट या प्रिंट लेकर अपने पास रख लें।</li>
+</ol>
+
+<h2>Difference Between City Slip and Admit Card (सिटी स्लिप और एडमिट कार्ड में मुख्य अंतर)</h2>
+<table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;border:1px solid #dadce0;font-size:14px;margin:16px 0;">
+  <thead>
+    <tr style="background:#f1f3f4;">
+      <th style="padding:10px;text-align:left;">विवरण (Feature)</th>
+      <th style="padding:10px;text-align:left;">एग्जाम सिटी स्लिप (City Slip)</th>
+      <th style="padding:10px;text-align:left;">एडमिट कार्ड (Admit Card)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding:10px;font-weight:600;">उद्देश्य (Purpose)</td>
+      <td style="padding:10px;">केवल परीक्षा शहर व जिले की अग्रिम जानकारी</td>
+      <td style="padding:10px;">परीक्षा हॉल में प्रवेश हेतु अनिवार्य दस्तावेज</td>
+    </tr>
+    <tr style="background:#f8f9fa;">
+      <td style="padding:10px;font-weight:600;">केंद्र का नाम व पता</td>
+      <td style="padding:10px;">केवल शहर/जिले का नाम (सेंटर का पता नहीं)</td>
+      <td style="padding:10px;">स्कूल/कॉलेज/सेंटर का पूरा नाम व पिनकोड</td>
+    </tr>
+    <tr>
+      <td style="padding:10px;font-weight:600;">परीक्षा हॉल में अनुमति</td>
+      <td style="padding:10px;"><strong style="color:#d93025;">प्रवेश मान्य नहीं</strong></td>
+      <td style="padding:10px;"><strong style="color:#188038;">प्रवेश हेतु 100% अनिवार्य</strong></td>
+    </tr>
+    <tr style="background:#f8f9fa;">
+      <td style="padding:10px;font-weight:600;">जारी होने का समय</td>
+      <td style="padding:10px;">परीक्षा से 7 से 10 दिन पूर्व</td>
+      <td style="padding:10px;">परीक्षा से 3 से 4 दिन पूर्व</td>
+    </tr>
+  </tbody>
+</table>
+"""
+    elif stage == "Exam Date":
+        core_body = f"""
+<h2>Exam Schedule &amp; Shift Timing Announced (परीक्षा तिथि और विस्तृत कार्यक्रम)</h2>
+<p><strong>{short_org}</strong> द्वारा <strong>{raw_title}</strong> के लिए परीक्षा तिथियों की आधिकारिक घोषणा कर दी गई है। आयोग द्वारा जारी विस्तृत परीक्षा कैलेंडर के अनुसार परीक्षा विभिन्न तिथियों एवं शिफ्टों में आयोजित की जाएगी।</p>
+<p>अभ्यर्थी ऊपर दिए गए डायरेक्ट लिंक से आधिकारिक नोटिस पीडीएफ डाउनलोड करके अपनी संबंधित पोस्ट या विषय का परीक्षा समय देख सकते हैं।</p>
+
+<h2>Important Dates &amp; Selection Timeline (महत्वपूर्ण तिथियां और परीक्षा शेड्यूल)</h2>
+<ul style="line-height:1.8;font-size:15px;">
+  <li><strong>घोषित परीक्षा कार्यक्रम:</strong> {details['dates_info']}</li>
+  <li><strong>एग्जाम सिटी इंटिमेशन स्लिप:</strong> परीक्षा तिथि से लगभग 7 से 10 दिन पूर्व उपलब्ध कराई जाएगी।</li>
+  <li><strong>मूल एडमिट कार्ड (Hall Ticket):</strong> परीक्षा तिथि से 3-4 दिन पूर्व आधिकारिक पोर्टल पर लाइव होगा।</li>
+</ul>
+"""
+    elif stage == "Admit Card":
         core_body = f"""
 <h2>Exam Schedule, Reporting Time &amp; Shift Details (परीक्षा तिथि, शिफ्ट टाइमिंग और रिपोर्टिंग समय)</h2>
 <p><strong>{short_org}</strong> द्वारा <strong>{raw_title}</strong> का Admit Card जारी किए जाने के बाद अभ्यर्थियों को सबसे पहले अपने परीक्षा केंद्र (Exam Center) का पता, परीक्षा की तिथि और शिफ्ट टाइमिंग अच्छे से नोट कर लेनी चाहिए। परीक्षा केंद्र पर रिपोर्टिंग टाइम से कम से कम 45 मिनट पहले पहुंचना समझदारी भरा कदम होता है, क्योंकि गेट बंद होने के बाद बायोमेट्रिक वेरिफिकेशन और मेटल डिटेक्टर चेकिंग के चलते किसी भी अभ्यर्थी को अंदर जाने की अनुमति नहीं मिलती।</p>
@@ -1176,6 +1295,28 @@ def build_human_master_article(
   <li><strong>फाइनल सबमिशन के बाद प्रिंट:</strong> फॉर्म केवल 'Save' करने से पूरा नहीं होता। 'Final Submit' बटन दबाने के बाद एप्लीकेशन फॉर्म पर 'Application Submitted Successfully' का मैसेज और रजिस्ट्रेशन नंबर अवश्य चेक करें।</li>
 </ul>
 
+<h2>Important Links &amp; Official PDF Download (महत्वपूर्ण लिंक्स एवं आधिकारिक पीडीएफ)</h2>
+<table border="1" cellpadding="10" cellspacing="0" width="100%" style="border-collapse:collapse;border:1px solid #dadce0;font-size:15px;margin:16px 0;">
+  <tbody>
+    <tr style="background:#f8f9fa;">
+      <td style="padding:12px;font-weight:600;width:40%;">Official Notification / Circular PDF</td>
+      <td style="padding:12px;">
+        <a href="{official_notice_url}" target="_blank" rel="noopener noreferrer" style="color:#1a73e8;font-weight:700;">
+          📥 Download Official Notice PDF
+        </a>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:12px;font-weight:600;">Official Portal Website</td>
+      <td style="padding:12px;">
+        <a href="{portal_url}" target="_blank" rel="noopener noreferrer" style="color:#1a73e8;font-weight:700;">
+          🌐 {portal_url}
+        </a>
+      </td>
+    </tr>
+  </tbody>
+</table>
+
 <h2>Frequently Asked Questions (अभ्यर्थियों द्वारा अक्सर पूछे जाने वाले महत्वपूर्ण सवाल - FAQs)</h2>
 <div style="background:#fdfdfd;border:1px solid #e8eaed;padding:16px 20px;border-radius:6px;margin:20px 0;">
   <p style="margin:0 0 4px 0;font-weight:700;font-size:15px;color:#1a73e8;">प्रश्न: यदि आधिकारिक पोर्टल पर मेरा रोल नंबर या नाम प्रदर्शित नहीं हो रहा है तो क्या करें?</p>
@@ -1194,10 +1335,9 @@ def build_human_master_article(
 </p>
 """
 
-    # Combine All Sections
     intro_p = f"""
 <p style="font-size:16px;line-height:1.7;">
-  <strong>{short_org} ({org})</strong> ने <strong>{raw_title}</strong> के संबंध में आधिकारिक अपडेट जारी किया है। 
+  <strong>{short_org} ({org})</strong> ने <strong>{clean_exam_name}</strong> के संबंध में आधिकारिक अपडेट जारी किया है। 
   वे सभी उम्मीदवार जो इस भर्ती परीक्षा से जुड़े हैं, वे नीचे दिए गए विस्तृत विवरण के माध्यम से पात्रता, तारीखें, 
   डाउनलोड प्रक्रिया और चयन के महत्वपूर्ण चरणों की पूरी जानकारी आसान भाषा में प्राप्त कर सकते हैं।
 </p>
@@ -1211,10 +1351,6 @@ def build_human_master_article(
 # 8. GEMINI AI WRITER (MODERN SDK + GROUNDING + HUMAN TONE)
 # ==============================================================================
 def call_gemini_writer(prompt: str) -> str:
-    """
-    Calls the modern Google GenAI SDK (gemini-2.5-flash or configured model)
-    with strict anti-AI tone rules.
-    """
     api_key = CONFIG["gemini_api_key"]
     if not api_key:
         return ""
@@ -1247,12 +1383,6 @@ def build_complete_article(
     is_live_update: bool = False,
     stages_history: list | None = None,
 ) -> tuple[str, str, int]:
-    """
-    Orchestrates the article generation:
-    1. Builds high-E-E-A-T human foundation.
-    2. Uses Gemini 2.5 Flash to enrich if API key is active.
-    3. Guarantees word count > 1100 without artificial filler loops.
-    """
     short_org = portal_info.get("short_org") or portal_info.get("org") or "Govt"
     seo_title = build_clean_title(short_org, raw_title, stage, is_live_update=is_live_update)
     human_article = build_human_master_article(
@@ -1270,20 +1400,27 @@ You are a senior educational journalist and career counselor with 10+ years of e
 Write an in-depth, authentic, empathetic, and comprehensive article in natural Devanagari Hindi (interspersed with standard English exam terms candidates search for like Admit Card, Cut Off, Scorecard, Merit List, Shift Timing, Direct Link, Eligibility).
 
 STRICT ANTI-AI, ADSENSE COMPLIANCE & FORMAT RULES:
-1. TITLE FORMAT: The Article Title MUST be written in clean, professional English (e.g. "[Out] SSC CGL Result 2026: Tier 1 Merit List PDF, Scorecard & Cut Off Marks Released").
+1. TITLE FORMAT: The Article Title MUST be written in 100% clean, professional English (ZERO Hindi words, NO prefixes like [Out] or [Live]). Example: "RSSB Rajasthan CET Exam City Slip 2026: District Center Location & Intimation PDF Link".
 2. BILINGUAL HEADINGS: Every <h2> and <h3> heading MUST be bilingual with English first and Hindi second in parentheses. Example: <h2>Quick Overview & Key Details (महत्वपूर्ण विवरण और मुख्य बिंदु)</h2>.
-3. BODY LANGUAGE: Body paragraphs must be written in natural, engaging Devanagari Hindi with standard English examination terms (like Cut Off, Merit List, Admit Card, Shift Timing, Direct Link).
-4. NEVER use sterile AI clichés like "निष्कर्ष", "संक्षेप में", "जैसा कि हम सभी जानते हैं", "उल्लेखनीय है कि", "अतः यह कहा जा सकता है".
-5. Vary sentence lengths with natural human flow (mix punchy short sentences with clear explanations).
-6. Provide realistic candidate guidance: photo/signature pixel dimension warnings, server slowdown alerts near deadlines, reservation certificate validity rules, and what to do if registration numbers are lost.
+3. ACCURATE STAGE RECOGNITION: The current update stage is strictly "{stage}".
+   - If stage is "City Slip": Clearly inform candidates that this is only the Exam City Intimation Slip (to know their district and travel advance), NOT the final Admit Card! Explain that the final Admit Card will be released 3-4 days before exam.
+   - If stage is "Admit Card": Provide entry guidelines, photo ID rules, shift reporting time, and download steps.
+   - If stage is "Exam Date": Provide exam calendar and schedule.
+   - If stage is "Result": Provide cut-off details, tie-breaking criteria, and scorecard check steps.
+   - If stage is "Answer Key": Explain how to calculate raw score and submit objections.
+   - If stage is "Jobs": Explain eligibility, vacancies, fee, and selection process.
+4. BODY LANGUAGE: Body paragraphs must be written in natural, engaging Devanagari Hindi with standard English examination terms (like Cut Off, Merit List, Admit Card, Shift Timing, Direct Link).
+5. OFFICIAL PDF LINK: Retain the direct official notice PDF download button link from the template.
+6. NEVER use sterile AI clichés like "निष्कर्ष", "संक्षेप में", "जैसा कि हम सभी जानते हैं", "उल्लेखनीय है कि", "अतः यह कहा जा सकता है".
 7. Total length must be at least {CONFIG['min_words']} words of rich, informative content. NEVER write artificial repeating filler notes.
-8. Retain the Quick Overview table at the top and end with the JSON-LD FAQ schema.
+8. Retain the Quick Overview table at the top, the Important Links table, and end with the JSON-LD FAQ schema.
 9. Return purely clean HTML elements (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>, <script>). Do NOT wrap in markdown backticks.
 
 Title: {seo_title}
 Organization: {portal_info.get('org', short_org)}
 Current Stage: {stage}
 Live Update Mode: {is_live_update}
+Official Notice PDF: {details.get('official_notice_link', '')}
 
 Base Content to Expand and Perfect:
 {human_article[:7000]}
@@ -1302,11 +1439,6 @@ Base Content to Expand and Perfect:
 # 9. WORDPRESS PUBLISHER & STRICT NO-DUPLICATE UPDATES (WITH 404 AUTO-HEALING)
 # ==============================================================================
 def find_existing_wp_post(short_org: str, raw_title: str, headers: dict) -> int:
-    """
-    Looks up existing WordPress post by short_org AND canonical exam name.
-    If an existing post for 'SSC CGL' or 'UPSC CSE' is found, returns its ID
-    so the bot UPDATES it rather than writing a duplicate article!
-    """
     slug, label = get_canonical_exam_info(raw_title)
     if not label or label == slug or len(label) < 3:
         return 0
@@ -1322,7 +1454,6 @@ def find_existing_wp_post(short_org: str, raw_title: str, headers: dict) -> int:
         if resp.status_code == 200:
             posts = resp.json() or []
             for p in posts:
-                # Do NOT link to trashed posts
                 if p.get("status") == "trash":
                     continue
                 existing_title = BeautifulSoup(p.get("title", {}).get("rendered", ""), "html.parser").get_text(" ", strip=True).lower()
@@ -1379,7 +1510,6 @@ def push_to_wordpress(title: str, html_content: str, short_org: str, stage: str,
                 data = resp.json()
                 return True, int(data.get("id") or wp_post_id), str(data.get("link") or "")
             elif resp.status_code == 404:
-                # Post was deleted or trashed in WordPress! Fallback to creating a new post.
                 print(f"   [INFO] Post ID {wp_post_id} not found on WordPress (deleted/trashed). Creating a fresh post...")
                 wp_post_id = 0
             else:
@@ -1395,7 +1525,7 @@ def push_to_wordpress(title: str, html_content: str, short_org: str, stage: str,
             print(f"   [WP ERROR] '{title}': {e}")
             return False, wp_post_id, ""
 
-    # 2. Create Brand New Post (for new articles OR fallback when old post was deleted)
+    # 2. Create Brand New Post
     try:
         resp = requests.post(base_endpoint, headers=headers, json=payload, timeout=25)
         resp.raise_for_status()
@@ -1507,6 +1637,13 @@ def run_writer_pipeline() -> None:
                 item["portal_url"],
                 fallback_dt=item.get("fallback_dt"),
             )
+
+            # MANDATORY OFFICIAL PDF LINK REQUIREMENT:
+            # An authentic post MUST link directly to the official government notification / PDF.
+            if not details.get("official_notice_link"):
+                skipped_items += 1
+                continue
+
             content_hash = hashlib.md5(
                 f"{item['title']}|{item['stage']}|{item['target_url']}|{details['text_excerpt'][:600]}".encode("utf-8")
             ).hexdigest()
@@ -1610,33 +1747,25 @@ def run_writer_pipeline() -> None:
 # 11. SAMPLE DEMO GENERATOR (FOR IMMEDIATE VISUAL INSPECTION)
 # ==============================================================================
 def generate_sample_demo_article() -> None:
-    """
-    Generates a full, live sample article demonstrating:
-    1. Human senior journalist writing style.
-    2. Zero AI clichés & natural exam terminology.
-    3. Practical candidate insights (E-E-A-T).
-    4. Google Rich Results FAQ Schema.
-    5. Clean HTML preview file saved to disk.
-    """
     os.makedirs(CONFIG["cache_dir"], exist_ok=True)
     sample_portal = {
-        "org": "Staff Selection Commission (SSC)",
-        "short_org": "SSC",
-        "url": "https://ssc.gov.in",
-        "portal_url": "https://ssc.gov.in"
+        "org": "Rajasthan Staff Selection Board (RSSB)",
+        "short_org": "RSSB Rajasthan",
+        "url": "https://rssb.rajasthan.gov.in",
+        "portal_url": "https://rssb.rajasthan.gov.in"
     }
-    sample_title = "Combined Graduate Level Examination (Tier-I) 2026 Result & Merit List"
-    sample_stage = "Result"
+    sample_title = "किस शहर में होगा आपका एग्जाम? राजस्थान CET की सिटी स्लिप जारी; एडमिट कार्ड की डेट भी आई"
+    sample_stage = detect_stage(sample_title)
     sample_details = {
         "doc_type": "Official PDF",
-        "official_notice_link": "https://ssc.gov.in/notice/cgl-2026-tier1-result.pdf",
-        "vacancy_info": "17,727 Vacancies (Tentative Notification के अनुसार)",
+        "official_notice_link": "https://rssb.rajasthan.gov.in/Static/files/CET_Graduation_2026_City_Intimation_Notice.pdf",
+        "vacancy_info": "Common Eligibility Test (CET Graduation Level)",
         "qualification_info": "Graduation Degree (किसी भी मान्यता प्राप्त विश्वविद्यालय से)",
-        "age_info": "18 से 30 / 32 वर्ष (पोस्ट अनुसार)",
-        "fee_info": "Rs. 100 (महिला / SC / ST / PwD हेतु छूट)",
-        "dates_info": "Exam Date: 12-26 Sep 2026 | Tier-II: Dec 2026",
-        "headings": ["Important Dates", "Cut-Off Marks", "Tie-Breaking Criteria", "Next Steps"],
-        "text_excerpt": "Staff Selection Commission declaration of result of Combined Graduate Level Tier-I Examination 2026...",
+        "age_info": "18 से 40 वर्ष",
+        "fee_info": "One Time Registration (OTR) के तहत लागू",
+        "dates_info": "Exam Date: 21-23 Oct 2026 | Shift: 09:00 AM & 03:00 PM",
+        "headings": ["Important Dates", "Exam Center Districts", "City Slip vs Admit Card", "Guidelines"],
+        "text_excerpt": "Rajasthan Staff Selection Board RSSB CET Graduation Level Exam City Intimation Slip release notice...",
         "detected_dt": now_ist_dt(),
         "has_exact_time": True,
     }
@@ -1651,7 +1780,7 @@ def generate_sample_demo_article() -> None:
         stage=sample_stage,
         details=sample_details,
         is_live_update=True,
-        stages_history=["Jobs", "Admit Card", "Answer Key", "Result"]
+        stages_history=["Jobs", "Exam Date", "City Slip"]
     )
 
     sample_out_file = os.path.join(CONFIG["cache_dir"], "sample_article_preview.html")
