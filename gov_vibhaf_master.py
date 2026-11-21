@@ -1299,7 +1299,7 @@ Base Content to Expand and Perfect:
 
 
 # ==============================================================================
-# 9. WORDPRESS PUBLISHER & STRICT NO-DUPLICATE UPDATES
+# 9. WORDPRESS PUBLISHER & STRICT NO-DUPLICATE UPDATES (WITH 404 AUTO-HEALING)
 # ==============================================================================
 def find_existing_wp_post(short_org: str, raw_title: str, headers: dict) -> int:
     """
@@ -1308,6 +1308,8 @@ def find_existing_wp_post(short_org: str, raw_title: str, headers: dict) -> int:
     so the bot UPDATES it rather than writing a duplicate article!
     """
     slug, label = get_canonical_exam_info(raw_title)
+    if not label or label == slug or len(label) < 3:
+        return 0
     query_str = f"{short_org} {label}".strip()
     try:
         search_url = f"{CONFIG['wp_site_url']}/wp-json/wp/v2/posts"
@@ -1320,6 +1322,9 @@ def find_existing_wp_post(short_org: str, raw_title: str, headers: dict) -> int:
         if resp.status_code == 200:
             posts = resp.json() or []
             for p in posts:
+                # Do NOT link to trashed posts
+                if p.get("status") == "trash":
+                    continue
                 existing_title = BeautifulSoup(p.get("title", {}).get("rendered", ""), "html.parser").get_text(" ", strip=True).lower()
                 if short_org.lower() in existing_title and (label.lower() in existing_title or slug.replace("_", " ") in existing_title):
                     return int(p.get("id") or 0)
@@ -1364,16 +1369,42 @@ def push_to_wordpress(title: str, html_content: str, short_org: str, stage: str,
     }
 
     base_endpoint = f"{CONFIG['wp_site_url']}/wp-json/wp/v2/posts"
-    endpoint = f"{base_endpoint}/{wp_post_id}" if wp_post_id > 0 else base_endpoint
 
+    # 1. Try Updating if Post ID is known
+    if wp_post_id > 0:
+        endpoint = f"{base_endpoint}/{wp_post_id}"
+        try:
+            resp = requests.post(endpoint, headers=headers, json=payload, timeout=25)
+            if resp.status_code == 200:
+                data = resp.json()
+                return True, int(data.get("id") or wp_post_id), str(data.get("link") or "")
+            elif resp.status_code == 404:
+                # Post was deleted or trashed in WordPress! Fallback to creating a new post.
+                print(f"   [INFO] Post ID {wp_post_id} not found on WordPress (deleted/trashed). Creating a fresh post...")
+                wp_post_id = 0
+            else:
+                resp.raise_for_status()
+        except requests.exceptions.HTTPError as he:
+            if he.response is not None and he.response.status_code == 404:
+                print(f"   [INFO] Post ID {wp_post_id} returned 404 (deleted/trashed). Creating a fresh post...")
+                wp_post_id = 0
+            else:
+                print(f"   [WP ERROR] '{title}': {he}")
+                return False, wp_post_id, ""
+        except Exception as e:
+            print(f"   [WP ERROR] '{title}': {e}")
+            return False, wp_post_id, ""
+
+    # 2. Create Brand New Post (for new articles OR fallback when old post was deleted)
     try:
-        resp = requests.post(endpoint, headers=headers, json=payload, timeout=25)
+        resp = requests.post(base_endpoint, headers=headers, json=payload, timeout=25)
         resp.raise_for_status()
         data = resp.json()
-        return True, int(data.get("id") or wp_post_id or 0), str(data.get("link") or "")
+        new_id = int(data.get("id") or 0)
+        return True, new_id, str(data.get("link") or "")
     except Exception as e:
         print(f"   [WP ERROR] '{title}': {e}")
-        return False, wp_post_id, ""
+        return False, 0, ""
 
 
 # ==============================================================================
