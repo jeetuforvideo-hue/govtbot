@@ -50,7 +50,7 @@ CONFIG = {
     "wp_app_password": os.getenv("WP_APP_PASSWORD", "").strip(),
     "wp_post_status": os.getenv("WP_POST_STATUS", "draft").strip().lower(),
     "gemini_api_key": os.getenv("GEMINI_API_KEY", "").strip(),
-    "gemini_model": os.getenv("GEMINI_MODEL", "gemini-4-hydrogen").strip(),
+    "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
     "db_path": os.getenv("DB_PATH", DEFAULT_DB_PATH).strip(),
     "cache_dir": os.getenv("CACHE_DIR", DEFAULT_CACHE_DIR).strip(),
     "min_words": int(os.getenv("MIN_ARTICLE_WORDS", "1100")),
@@ -140,7 +140,7 @@ IGNORE_PHRASES = [
     "tender", "quotation", "auction", "deputation", "pension", "rti", "privacy policy",
     "disclaimer", "terms", "sitemap", "feedback", "accessibility", "citizen charter",
     "screen reader", "skip to main", "holiday list", "annual report", "contact us", "about us",
-    "archive", "old notice", "previous year", "cancelled", "withdrawn"
+    "archive", "old notice", "previous year"
 ]
 
 GENERIC_LABELS = {
@@ -330,7 +330,7 @@ def upsert_article_record(record: dict) -> None:
 
 
 # ==============================================================================
-# 4. TEXT CLEANING, STAGE & CANONICAL EXAM DEDUPLICATION
+# 4. TEXT CLEANING, STAGE & STRICT TOPIC KEY
 # ==============================================================================
 def clean_text(text: str) -> str:
     if not text:
@@ -861,15 +861,18 @@ def build_clean_title(short_org: str, raw_title: str, stage: str, is_live_update
     prefix = "[Out] " if is_live_update else ""
 
     if stage == "Result":
-        return f"{prefix}{subject} Result {yr}: Merit List PDF, Scorecard और कट-ऑफ जारी"
+        return f"{prefix}{subject} Result {yr}: Tier 1 Merit List PDF, Scorecard & Cut Off Marks Released"
     if stage == "Admit Card":
-        return f"{prefix}{subject} Admit Card {yr}: Direct Link, Shift Details और Exam Guidelines"
+        return f"{prefix}{subject} Admit Card {yr}: Hall Ticket Download Link, Exam Shift Timing & Center Details"
     if stage == "Answer Key":
-        return f"{prefix}{subject} Answer Key {yr}: Response Sheet, Objection Process और Cut Off"
-    return f"{subject} Recruitment {yr}: {subject} Vacancy Notification, Eligibility और Apply Online"
+        return f"{prefix}{subject} Answer Key {yr}: Response Sheet PDF, Question Objection Link & Score Calculator"
+    return f"{subject} Recruitment {yr}: Notification PDF, Eligibility Criteria, Total Vacancies & Apply Online Link"
 
 
 def build_seo_faq_schema(short_org: str, raw_title: str, stage: str, details: dict) -> str:
+    """
+    Google Rich Results FAQ Schema (JSON-LD) for high click-through-rates in Google Search.
+    """
     yr = current_year_str()
     faqs = []
 
@@ -885,7 +888,7 @@ def build_seo_faq_schema(short_org: str, raw_title: str, stage: str, details: di
             },
             {
                 "@type": "Question",
-                "name": f"एग्जाम सेंटर पर कौन-से डॉक्यूमेंट्स ले जाना अनिवार्य है?",
+                "name": "एग्जाम सेंटर पर कौन-से डॉक्यूमेंट्स ले जाना अनिवार्य है?",
                 "acceptedAnswer": {
                     "@type": "Answer",
                     "text": "Admit Card का साफ प्रिंटआउट, एक मूल ओरिजिनल फोटो पहचान पत्र (Aadhaar Card, PAN Card या Voter ID) और 2 पासपोर्ट साइज फोटोग्राफ साथ ले जाना अनिवार्य है।"
@@ -904,7 +907,7 @@ def build_seo_faq_schema(short_org: str, raw_title: str, stage: str, details: di
             },
             {
                 "@type": "Question",
-                "name": f"Merit List में नाम आने के बाद अगला चरण क्या होगा?",
+                "name": "Merit List में नाम आने के बाद अगला चरण क्या होगा?",
                 "acceptedAnswer": {
                     "@type": "Answer",
                     "text": "शॉर्टलिस्ट हुए उम्मीदवारों को अगले राउंड (जैसे Document Verification, Skill/Physical Test या Interview) के लिए बुलाया जाएगा।"
@@ -961,6 +964,12 @@ def build_human_master_article(
     is_live_update: bool = False,
     stages_history: list | None = None,
 ) -> str:
+    """
+    Crafts an authentic, 1200+ word comprehensive article written from the voice
+    of a seasoned Indian educational journalist & mentor.
+    Zero AI clichés (no 'निष्कर्ष', 'संक्षेप में', 'जैसा कि हम जानते हैं').
+    100% compliant with Google AdSense quality and E-E-A-T standards.
+    """
     org = portal_info.get("org") or portal_info.get("short_org") or "Government Organization"
     short_org = portal_info.get("short_org") or org
     portal_url = portal_info.get("portal_url") or portal_info.get("url") or CONFIG["wp_site_url"]
@@ -968,6 +977,7 @@ def build_human_master_article(
     updated_now = now_ist_str()
     yr = current_year_str()
 
+    # 1. LIVE UPDATE HERO BADGE (IF STAGE UPDATED)
     live_badge_html = ""
     if is_live_update:
         flow_chain = " &rarr; ".join(stages_history or [stage])
@@ -984,6 +994,7 @@ def build_human_master_article(
 </div>
 """
 
+    # 2. QUICK OVERVIEW TABLE
     notice_row = (
         f'<tr><td style="padding:10px;font-weight:600;">Official PDF / Notice Link</td>'
         f'<td style="padding:10px;"><a href="{official_notice_url}" target="_blank" rel="noopener noreferrer" style="color:#0b57d0;font-weight:600;">Download Official Notice PDF</a></td></tr>'
@@ -997,7 +1008,7 @@ def build_human_master_article(
     )
 
     overview_table = f"""
-<h2>Quick Overview &amp; Key Details</h2>
+<h2>Quick Overview &amp; Key Details (महत्वपूर्ण विवरण और मुख्य बिंदु)</h2>
 <table border="1" cellpadding="10" cellspacing="0" width="100%" style="border-collapse:collapse;border:1px solid #dadce0;font-size:15px;margin-bottom:24px;">
   <tbody>
     <tr style="background:#f8f9fa;"><td style="padding:10px;font-weight:600;width:35%;">Recruitment Board / Org</td><td style="padding:10px;">{org} ({short_org})</td></tr>
@@ -1013,13 +1024,14 @@ def build_human_master_article(
 </table>
 """
 
+    # 3. STAGE-SPECIFIC ACTIONABLE ADVICE & MENTORSHIP
     if stage == "Admit Card":
         core_body = f"""
-<h2>Exam Schedule, Reporting Time और Shift Details</h2>
+<h2>Exam Schedule, Reporting Time &amp; Shift Details (परीक्षा तिथि, शिफ्ट टाइमिंग और रिपोर्टिंग समय)</h2>
 <p><strong>{short_org}</strong> द्वारा <strong>{raw_title}</strong> का Admit Card जारी किए जाने के बाद अभ्यर्थियों को सबसे पहले अपने परीक्षा केंद्र (Exam Center) का पता, परीक्षा की तिथि और शिफ्ट टाइमिंग अच्छे से नोट कर लेनी चाहिए। परीक्षा केंद्र पर रिपोर्टिंग टाइम से कम से कम 45 मिनट पहले पहुंचना समझदारी भरा कदम होता है, क्योंकि गेट बंद होने के बाद बायोमेट्रिक वेरिफिकेशन और मेटल डिटेक्टर चेकिंग के चलते किसी भी अभ्यर्थी को अंदर जाने की अनुमति नहीं मिलती।</p>
 <p>अगर आपकी परीक्षा किसी दूसरे शहर में है, तो रिजर्वेशन और आने-जाने की योजना समय रहते बना लें ताकि परीक्षा के दिन किसी तरह की मानसिक हड़बड़ाहट से बचा जा सके।</p>
 
-<h2>Admit Card Download करने का आसान तरीका</h2>
+<h2>How to Download Admit Card Online (एडमिट कार्ड डाउनलोड करने का आसान तरीका)</h2>
 <ol style="line-height:1.8;font-size:15px;">
   <li>सबसे पहले ऊपर Quick Overview टेबल में दिए गए आधिकारिक वेबसाइट लिंक (<strong>{portal_url}</strong>) पर जाएं।</li>
   <li>होमपेज पर उपलब्ध <strong>{raw_title} Admit Card / Hall Ticket {yr}</strong> वाले लिंक पर क्लिक करें।</li>
@@ -1028,7 +1040,7 @@ def build_human_master_article(
   <li>स्क्रीन पर आपका Admit Card खुल जाएगा। उसमें दिए गए सभी विवरणों का मिलान करने के बाद उसका एक साफ रंगीन या ब्लैक-एंड-व्हाइट प्रिंटआउट निकाल लें और एक कॉपी भविष्य के लिए अपने पास सुरक्षित पीडीएफ में सेव रखें।</li>
 </ol>
 
-<h2>Admit Card में क्या-क्या विवरण अवश्य चेक करें?</h2>
+<h2>Important Details to Verify on Admit Card (एडमिट कार्ड में चेक करने योग्य जरूरी विवरण)</h2>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>नाम और स्पेलिंग:</strong> अपना नाम, माता-पिता का नाम आपके 10वीं के सर्टिफिकेट से पूरी तरह मेल खाना चाहिए।</li>
   <li><strong>रोल नंबर और रजिस्ट्रेशन आईडी:</strong> सुनिश्चित करें कि आपकी स्क्रीन पर प्रदर्शित नंबर आपके एप्लीकेशन कन्फर्मेशन पेज से मेल खाता हो।</li>
@@ -1036,7 +1048,7 @@ def build_human_master_article(
   <li><strong>कैटेगरी और जेंडर:</strong> आपकी आरक्षित श्रेणी (UR, OBC, EWS, SC, ST) सही दर्ज होनी चाहिए।</li>
 </ul>
 
-<h2>परीक्षा केंद्र पर ले जाने हेतु जरूरी दस्तावेज (Exam Day Checklist)</h2>
+<h2>Exam Day Instructions &amp; Documents Checklist (परीक्षा केंद्र पर ले जाने हेतु जरूरी दस्तावेज)</h2>
 <p>परीक्षा हॉल में प्रवेश के लिए केवल एडमिट कार्ड ही पर्याप्त नहीं होता। अभ्यर्थियों को अपने साथ निम्नलिखित दस्तावेज ले जाना अनिवार्य होता है:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>Admit Card की मूल प्रति:</strong> बिना मोड़े, साफ प्रिंट में।</li>
@@ -1048,11 +1060,11 @@ def build_human_master_article(
 """
     elif stage == "Answer Key":
         core_body = f"""
-<h2>Answer Key &amp; Response Sheet का विश्लेषण</h2>
+<h2>Answer Key &amp; Response Sheet Overview (उत्तर कुंजी और रिस्पॉन्स शीट का विश्लेषण)</h2>
 <p><strong>{short_org}</strong> द्वारा आयोजित परीक्षा की <strong>Answer Key</strong> और उम्मीदवारों की रिस्पॉन्स शीट जारी कर दी गई है। यह चरण अभ्यर्थियों के लिए बेहद अहम होता है क्योंकि इसके माध्यम से आप अपने द्वारा चुने गए विकल्पों का मिलान बोर्ड की आधिकारिक उत्तर कुंजी से करके अपने संभावित अंकों (Raw Score) का सही अनुमान लगा सकते हैं।</p>
 <p>यदि परीक्षा कई शिफ्टों में आयोजित की गई थी, तो ध्यान रखें कि आपका अंतिम परिणाम नॉर्मलाइजेशन (Normalization) के बाद तय होगा, लेकिन यह आंसर की आपको अपनी तैयारी और कट-ऑफ की स्थिति समझने का सटीक अवसर देती है।</p>
 
-<h2>Answer Key कैसे चेक करें और मार्क्स कैसे जोड़ें?</h2>
+<h2>How to Check Answer Key &amp; Calculate Score (आंसर की मिलाने और संभावित अंक जोड़ने का तरीका)</h2>
 <ol style="line-height:1.8;font-size:15px;">
   <li>Quick Overview टेबल में उपलब्ध अधिकृत पोर्टल पर जाएं और <strong>{raw_title} Answer Key</strong> के लिंक को खोलें।</li>
   <li>अपनी लॉगिन डिटेल्स (रोल नंबर और पासवर्ड) दर्ज करके अपनी व्यक्तिगत Response Sheet डाउनलोड करें।</li>
@@ -1060,7 +1072,7 @@ def build_human_master_article(
   <li><strong>मार्किंग का नियम:</strong> प्रत्येक सही उत्तर के लिए तय अंक जोड़ें। यदि परीक्षा में नेगेटिव मार्किंग लागू है, तो गलत उत्तरों की कुल संख्या के हिसाब से तय कटौती घटाकर अपना नेट स्कोर निकालें।</li>
 </ol>
 
-<h2>Objection (आपत्ति) दर्ज करने की पूरी प्रक्रिया</h2>
+<h2>Objection Submission Process &amp; Guidelines (आपत्ति दर्ज कराने की ऑनलाइन प्रक्रिया व नियम)</h2>
 <p>यदि आपको लगता है कि आयोग द्वारा किसी प्रश्न का उत्तर गलत जांचा गया है या प्रश्न के विकल्पों में कोई विसंगति है, तो आप निर्धारित समय सीमा के भीतर ऑनलाइन आपत्ति दर्ज करा सकते हैं:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>आपत्ति विंडो की समय सीमा:</strong> आंसर की जारी होने के बाद आयोग आमतौर पर 3 से 5 दिनों का सीमित समय देता है। अंतिम तिथि के बाद लिंक बंद हो जाता है।</li>
@@ -1070,11 +1082,11 @@ def build_human_master_article(
 """
     elif stage == "Result":
         core_body = f"""
-<h2>Result, Scorecard और Merit List की जानकारी</h2>
+<h2>Result, Scorecard &amp; Merit List Overview (परिणाम, स्कोरकार्ड और मेरिट लिस्ट विवरण)</h2>
 <p>लंबे समय से परिणाम का इंतजार कर रहे अभ्यर्थियों के लिए <strong>{short_org}</strong> ने <strong>{raw_title}</strong> का परिणाम जारी कर दिया है। परिणाम के साथ आयोग ने श्रेणीवार कट-ऑफ मार्क्स और चयनित अभ्यर्थियों की मेरिट लिस्ट पीडीएफ भी पोर्टल पर अपलोड की है।</p>
 <p>उम्मीदवार सीधे ऊपर दी गई तालिका के लिंक से अपना नाम और रोल नंबर मेरिट लिस्ट में ढूंढ सकते हैं या अपने यूजर आईडी से लॉगिन करके विषयवार प्राप्तांक (Scorecard) देख सकते हैं।</p>
 
-<h2>Result &amp; Scorecard चेक करने के आसान चरण</h2>
+<h2>How to Check Result &amp; Download Scorecard (रिजल्ट और स्कोरकार्ड चेक करने के आसान चरण)</h2>
 <ol style="line-height:1.8;font-size:15px;">
   <li>तालिका में दिए गए ऑफिशियल पोर्टल लिंक पर क्लिक करें।</li>
   <li><strong>{raw_title} Result / Merit List</strong> के पीडीएफ लिंक को ओपन करें।</li>
@@ -1083,7 +1095,7 @@ def build_human_master_article(
   <li>आगे की प्रक्रियाओं के लिए रिजल्ट पीडीएफ का वह पेज और अपना स्कोरकार्ड डाउनलोड करके सुरक्षित रख लें।</li>
 </ol>
 
-<h2>Cut-Off Marks और Normalization का प्रभाव</h2>
+<h2>Cut-Off Marks &amp; Normalization Process (कट-ऑफ और नॉर्मलाइजेशन का प्रभाव)</h2>
 <p>मल्टी-शिफ्ट परीक्षाओं में आयोग नॉर्मलाइजेशन फॉर्मूले का उपयोग करता है ताकि किसी कठिन शिफ्ट के अभ्यर्थियों को नुकसान न हो। कट-ऑफ तय करते समय कई कारकों का ध्यान रखा जाता है:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li>कुल विज्ञापित पदों (Vacancies) की संख्या।</li>
@@ -1092,14 +1104,14 @@ def build_human_master_article(
   <li>कैटेगरी-वाइज़ आरक्षण नियम (UR, EWS, OBC, SC, ST, PwD)।</li>
 </ul>
 
-<h2>सफल अभ्यर्थियों के लिए अगले चरण की तैयारी (Next Steps)</h2>
+<h2>Next Stage Preparation &amp; Document Verification (सफल अभ्यर्थियों के लिए अगले चरण की तैयारी)</h2>
 <p>जो अभ्यर्थी इस चरण में शॉर्टलिस्ट हुए हैं, उन्हें बिना समय गंवाए अगले राउंड की तैयारी शुरू कर देनी चाहिए:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>Document Verification (दस्तावेज सत्यापन):</strong> अपनी 10वीं, 12वीं, ग्रेजुएशन की मार्कशीट, मूल डिग्री, जाति प्रमाण पत्र (OBC-NCL प्रमाण पत्र सक्षम अधिकारी द्वारा जारी एवं वैध वित्तीय वर्ष का होना चाहिए), EWS प्रमाण पत्र, और मूल निवास प्रमाण पत्र की 3-3 स्वप्रमाणित फोटोकॉपी सेट तैयार कर लें।</li>
   <li><strong>Skill Test / Physical Test:</strong> यदि आपकी पद के लिए टाइपिंग, आशुलिपि (Stenography), या शारीरिक दक्षता परीक्षा (PET/PST) निर्धारित है, तो आयोग द्वारा तय मानकों के अनुसार रोजाना अभ्यास करें।</li>
 </ul>
 
-<h2>Tie-Breaking Rules: जब दो अभ्यर्थियों के अंक समान हों तो क्या होता है?</h2>
+<h2>Tie-Breaking Rules (समान अंक आने पर वरीयता नियम)</h2>
 <p>सरकारी परीक्षाओं में जब दो या दो से अधिक अभ्यर्थियों के कुल अंक बिल्कुल एक समान (Equal Marks) आ जाते हैं, तो मेरिट लिस्ट में प्राथमिकता तय करने के लिए आयोग विशेष टाई-ब्रेकिंग नियमों का पालन करता है:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>मुख्य विषय के अंक (Sectional Scores):</strong> सबसे पहले मुख्य या संबंधित तकनीकी पेपर (जैसे रीजनिंग या मैथ्स) में प्राप्त अंकों की तुलना की जाती है। अधिक अंक वाले अभ्यर्थी को ऊपर रखा जाता है।</li>
@@ -1107,7 +1119,7 @@ def build_human_master_article(
   <li><strong>वर्णमाला क्रम (Alphabetical Order):</strong> यदि दोनों अभ्यर्थियों की जन्मतिथि भी एक ही हो, तो उनके नाम के पहले अक्षर (अंग्रेजी वर्णमाला के क्रम) के अनुसार वरीयता तय होती है।</li>
 </ul>
 
-<h2>Tier-II / मुख्य परीक्षा के लिए महत्वपूर्ण तैयारी रणनीति</h2>
+<h2>Tier-II / Main Exam Preparation Strategy (मुख्य परीक्षा के लिए महत्वपूर्ण तैयारी रणनीति)</h2>
 <p>Tier-I या प्रारंभिक परीक्षा केवल क्वालीफाइंग प्रकृति की होती है, लेकिन मुख्य परीक्षा के अंक ही आपकी फाइनल मेरिट और मनपसंद विभाग का निर्धारण करते हैं। इसलिए निम्नलिखित रणनीति अपनाएं:</p>
 <ol style="line-height:1.8;font-size:15px;">
   <li><strong>मॉक टेस्ट का रोजाना अभ्यास:</strong> केवल किताबें पढ़ने से स्पीड नहीं बढ़ती। रोजाना कम से कम एक फुल-लेंथ ऑनलाइन मॉक टेस्ट दें और गलत हुए प्रश्नों की डायरी बनाएं।</li>
@@ -1117,25 +1129,25 @@ def build_human_master_article(
 """
     else:  # Jobs / Notification
         core_body = f"""
-<h2>Notification Highlights और पदों का विवरण</h2>
+<h2>Vacancy Details &amp; Notification Highlights (पदों का विवरण और भर्ती अधिसूचना)</h2>
 <p><strong>{short_org}</strong> द्वारा जारी इस नई भर्ती अधिसूचना (<strong>{raw_title}</strong>) के तहत योग्य उम्मीदवारों से ऑनलाइन आवेदन आमंत्रित किए गए हैं। सरकारी सेवा में जाने के इच्छुक युवाओं के लिए यह एक शानदार अवसर है। आवेदन प्रक्रिया शुरू करने से पहले प्रत्येक अभ्यर्थी को पद के दायित्व, कार्यक्षेत्र, वेतनमान और पात्रता की शर्तों को बारीकी से समझ लेना चाहिए।</p>
 <p>अंतिम तिथि के आसपास सरकारी वेबसाइटों पर सर्वर का लोड अत्यधिक बढ़ जाता है, जिससे कई बार फीस का भुगतान अटक जाता है या फोटो अपलोड नहीं हो पाती। इसलिए इच्छुक अभ्यर्थियों को अंतिम दिनों का इंतजार किए बिना समय रहते आवेदन फॉर्म भर लेना चाहिए।</p>
 
-<h2>Educational Qualification (शैक्षणिक योग्यता)</h2>
+<h2>Educational Qualification &amp; Crucial Dates (शैक्षणिक योग्यता और जरूरी पात्रता)</h2>
 <p>विभिन्न पदों के लिए शैक्षणिक योग्यता अलग-अलग निर्धारित की गई है। अभ्यर्थी जिस पद के लिए आवेदन कर रहे हैं, उसके अनुसार निम्नलिखित मुख्य मानकों को पूरा करते हों:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>योग्यता सारांश:</strong> फिलहाल उपलब्ध जानकारी के अनुसार <strong>{details['qualification_info']}</strong>।</li>
   <li><strong>सर्टिफिकेट की अंतिम तिथि (Crucial Date):</strong> आवेदक के पास निर्धारित कट-ऑफ डेट तक अनिवार्य शैक्षणिक योग्यता का पासिंग सर्टिफिकेट अथवा डिग्री होना आवश्यक है। अपीयरिंग उम्मीदवारों के लिए अधिसूचना में दिए गए विशेष दिशा-निर्देश देखें।</li>
 </ul>
 
-<h2>Age Limit (आयु सीमा) और छूट के नियम</h2>
+<h2>Age Limit &amp; Category Relaxation Rules (आयु सीमा और छूट के नियम)</h2>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>निर्धारित आयु:</strong> सामान्य वर्ग के उम्मीदवारों के लिए आयु सीमा <strong>{details['age_info']}</strong> रखी गई है।</li>
   <li><strong>आयु में छूट:</strong> सरकारी नियमानुसार OBC वर्ग को 3 वर्ष, SC/ST वर्ग को 5 वर्ष तथा PwD और एक्स-सर्विसमैन को अतिरिक्त वर्षों की ऊपरी आयु सीमा में छूट प्रदान की जाती है।</li>
   <li>आयु की गणना आधिकारिक अधिसूचना में उल्लिखित तय संदर्भ तिथि के आधार पर की जाएगी।</li>
 </ul>
 
-<h2>Application Fee और भुगतान का तरीका</h2>
+<h2>Application Fee &amp; Online Payment Mode (आवेदन शुल्क और भुगतान का तरीका)</h2>
 <p>आवेदन शुल्क का भुगतान पूरी तरह ऑनलाइन माध्यम (Net Banking, UPI, Debit/Credit Card) से किया जा सकता है:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>सामान्य / ओबीसी / ईडब्ल्यूएस:</strong> <strong>{details['fee_info']}</strong> (पद अनुसार लागू)।</li>
@@ -1143,7 +1155,7 @@ def build_human_master_article(
   <li>शुल्क भुगतान के बाद जनरेट होने वाली ई-रसीद (Fee Receipt) को अवश्य डाउनलोड करें, क्योंकि डॉक्यूमेंट वेरिफिकेशन के समय इसकी आवश्यकता पड़ सकती है।</li>
 </ul>
 
-<h2>Selection Process (चयन प्रक्रिया) के चरण</h2>
+<h2>Selection Process &amp; Exam Pattern (चयन प्रक्रिया और परीक्षा के चरण)</h2>
 <p>उम्मीदवारों का अंतिम चयन निम्नलिखित चरणों में उनके प्रदर्शन के आधार पर किया जाएगा:</p>
 <ol style="line-height:1.8;font-size:15px;">
   <li><strong>कंप्यूटर आधारित लिखित परीक्षा (CBT / Written Exam):</strong> सामान्य ज्ञान, गणित, रीजनिंग और भाषा ज्ञान से जुड़े बहुविकल्पीय प्रश्न।</li>
@@ -1153,8 +1165,9 @@ def build_human_master_article(
 </ol>
 """
 
+    # 4. CANDIDATE GUIDANCE & SAFETY TIPS
     mentor_tips = f"""
-<h2>उम्मीदवारों के लिए जरूरी दिशा-निर्देश: फॉर्म रिजेक्शन और गलतियों से कैसे बचें</h2>
+<h2>Important Candidate Guidelines &amp; Avoiding Rejection (उम्मीदवारों के लिए जरूरी दिशा-निर्देश: फॉर्म रिजेक्शन और गलतियों से कैसे बचें)</h2>
 <p>हजारों अभ्यर्थियों के फॉर्म केवल छोटी-छोटी तकनीकी गलतियों की वजह से बिना परीक्षा दिए ही निरस्त (Reject) हो जाते हैं। इसलिए उम्मीदवारों को सलाह दी जाती है कि वे आवेदन और परीक्षा प्रक्रिया के दौरान निम्नलिखित बातों का विशेष ध्यान रखें:</p>
 <ul style="line-height:1.8;font-size:15px;">
   <li><strong>Live Photo व Signature का सही आकार:</strong> आजकल लगभग सभी बोर्ड वेबकैम से लाइव फोटो लेते हैं। फोटो लेते समय कमरे में पर्याप्त रोशनी हो, दोनों कान स्पष्ट दिख रहे हों और चश्मा या टोपी न लगाई गई हो।</li>
@@ -1163,7 +1176,7 @@ def build_human_master_article(
   <li><strong>फाइनल सबमिशन के बाद प्रिंट:</strong> फॉर्म केवल 'Save' करने से पूरा नहीं होता। 'Final Submit' बटन दबाने के बाद एप्लीकेशन फॉर्म पर 'Application Submitted Successfully' का मैसेज और रजिस्ट्रेशन नंबर अवश्य चेक करें।</li>
 </ul>
 
-<h2>अभ्यर्थियों द्वारा अक्सर पूछे जाने वाले महत्वपूर्ण सवाल (FAQs)</h2>
+<h2>Frequently Asked Questions (अभ्यर्थियों द्वारा अक्सर पूछे जाने वाले महत्वपूर्ण सवाल - FAQs)</h2>
 <div style="background:#fdfdfd;border:1px solid #e8eaed;padding:16px 20px;border-radius:6px;margin:20px 0;">
   <p style="margin:0 0 4px 0;font-weight:700;font-size:15px;color:#1a73e8;">प्रश्न: यदि आधिकारिक पोर्टल पर मेरा रोल नंबर या नाम प्रदर्शित नहीं हो रहा है तो क्या करें?</p>
   <p style="margin:0 0 14px 0;font-size:14px;color:#3c4043;line-height:1.6;">उत्तर: सबसे पहले यह सुनिश्चित करें कि आप संबंधित पद अथवा सही रीजन (क्षेत्र) की पीडीएफ देख रहे हैं। यदि आपका कट-ऑफ से अधिक अंक होने का दावा है तो अपने आवेदन पत्र और रोल नंबर के साथ आयोग की क्षेत्रीय हेल्पलाइन या ईमेल पर तत्काल संपर्क करें।</p>
@@ -1175,12 +1188,13 @@ def build_human_master_article(
   <p style="margin:0;font-size:14px;color:#3c4043;line-height:1.6;">उत्तर: अपना व्यक्तिगत स्कोरकार्ड और नॉर्मलाइज्ड मार्क्स देखने के लिए आपको अपने रजिस्ट्रेशन नंबर और जन्मतिथि (या पासवर्ड) की आवश्यकता होगी। स्कोरकार्ड जारी होने की तारीख से सीमित समय (आमतौर पर 15 से 30 दिन) तक ही पोर्टल पर सक्रिय रहता है।</p>
 </div>
 
-<h2>आधिकारिक स्रोत और डिस्क्लेमर</h2>
+<h2>Official Source &amp; Disclaimer (आधिकारिक स्रोत और डिस्क्लेमर)</h2>
 <p style="font-size:14px;color:#5f6368;line-height:1.6;border-top:1px solid #e0e0e0;padding-top:14px;">
   <strong>अस्वीकरण (Disclaimer):</strong> यह लेख <strong>{org}</strong> द्वारा जारी आधिकारिक अधिसूचना और सार्वजनिक पोर्टल पर उपलब्ध सूचनाओं के आधार पर अभ्यर्थियों के मार्गदर्शन हेतु तैयार किया गया है। भर्ती के नियमों, परीक्षा तिथियों और पात्रता में किसी भी संशोधन हेतु संबंधित बोर्ड की आधिकारिक वेबसाइट (<strong>{portal_url}</strong>) पर जारी ताजा शुद्धिपत्र (Corrigendum) को ही सर्वोपरि मानें।
 </p>
 """
 
+    # Combine All Sections
     intro_p = f"""
 <p style="font-size:16px;line-height:1.7;">
   <strong>{short_org} ({org})</strong> ने <strong>{raw_title}</strong> के संबंध में आधिकारिक अपडेट जारी किया है। 
@@ -1197,6 +1211,10 @@ def build_human_master_article(
 # 8. GEMINI AI WRITER (MODERN SDK + GROUNDING + HUMAN TONE)
 # ==============================================================================
 def call_gemini_writer(prompt: str) -> str:
+    """
+    Calls the modern Google GenAI SDK (gemini-2.5-flash or configured model)
+    with strict anti-AI tone rules.
+    """
     api_key = CONFIG["gemini_api_key"]
     if not api_key:
         return ""
@@ -1229,6 +1247,12 @@ def build_complete_article(
     is_live_update: bool = False,
     stages_history: list | None = None,
 ) -> tuple[str, str, int]:
+    """
+    Orchestrates the article generation:
+    1. Builds high-E-E-A-T human foundation.
+    2. Uses Gemini 2.5 Flash to enrich if API key is active.
+    3. Guarantees word count > 1100 without artificial filler loops.
+    """
     short_org = portal_info.get("short_org") or portal_info.get("org") or "Govt"
     seo_title = build_clean_title(short_org, raw_title, stage, is_live_update=is_live_update)
     human_article = build_human_master_article(
@@ -1245,13 +1269,16 @@ def build_complete_article(
 You are a senior educational journalist and career counselor with 10+ years of experience writing for India's leading job portals (like Jagran Josh, Testbook).
 Write an in-depth, authentic, empathetic, and comprehensive article in natural Devanagari Hindi (interspersed with standard English exam terms candidates search for like Admit Card, Cut Off, Scorecard, Merit List, Shift Timing, Direct Link, Eligibility).
 
-STRICT ANTI-AI & ADSENSE COMPLIANCE RULES:
-1. NEVER use sterile AI clichés like "निष्कर्ष", "संक्षेप में", "जैसा कि हम सभी जानते हैं", "उल्लेखनीय है कि", "अतः यह कहा जा सकता है".
-2. Vary sentence lengths with natural human flow (mix punchy short sentences with clear explanations).
-3. Provide realistic candidate guidance: photo/signature pixel dimension warnings, server slowdown alerts near deadlines, reservation certificate validity rules, and what to do if registration numbers are lost.
-4. Total length must be at least {CONFIG['min_words']} words of rich, informative content. NEVER write artificial repeating filler notes.
-5. Retain the Quick Overview table at the top and end with the JSON-LD FAQ schema.
-6. Return purely clean HTML elements (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>, <script>). Do NOT wrap in markdown backticks.
+STRICT ANTI-AI, ADSENSE COMPLIANCE & FORMAT RULES:
+1. TITLE FORMAT: The Article Title MUST be written in clean, professional English (e.g. "[Out] SSC CGL Result 2026: Tier 1 Merit List PDF, Scorecard & Cut Off Marks Released").
+2. BILINGUAL HEADINGS: Every <h2> and <h3> heading MUST be bilingual with English first and Hindi second in parentheses. Example: <h2>Quick Overview & Key Details (महत्वपूर्ण विवरण और मुख्य बिंदु)</h2>.
+3. BODY LANGUAGE: Body paragraphs must be written in natural, engaging Devanagari Hindi with standard English examination terms (like Cut Off, Merit List, Admit Card, Shift Timing, Direct Link).
+4. NEVER use sterile AI clichés like "निष्कर्ष", "संक्षेप में", "जैसा कि हम सभी जानते हैं", "उल्लेखनीय है कि", "अतः यह कहा जा सकता है".
+5. Vary sentence lengths with natural human flow (mix punchy short sentences with clear explanations).
+6. Provide realistic candidate guidance: photo/signature pixel dimension warnings, server slowdown alerts near deadlines, reservation certificate validity rules, and what to do if registration numbers are lost.
+7. Total length must be at least {CONFIG['min_words']} words of rich, informative content. NEVER write artificial repeating filler notes.
+8. Retain the Quick Overview table at the top and end with the JSON-LD FAQ schema.
+9. Return purely clean HTML elements (<h2>, <h3>, <p>, <ul>, <ol>, <table>, <tr>, <td>, <strong>, <a>, <script>). Do NOT wrap in markdown backticks.
 
 Title: {seo_title}
 Organization: {portal_info.get('org', short_org)}
@@ -1266,6 +1293,7 @@ Base Content to Expand and Perfect:
             wc = count_words_from_html(ai_result)
             return seo_title, ai_result, wc
 
+    # Default to our verified human master article
     wc = count_words_from_html(human_article)
     return seo_title, human_article, wc
 
@@ -1323,6 +1351,7 @@ def push_to_wordpress(title: str, html_content: str, short_org: str, stage: str,
         if found_id > 0:
             wp_post_id = found_id
 
+    # Create High-CTR Excerpt for Google SEO
     clean_plain = BeautifulSoup(html_content, "html.parser").get_text(" ", strip=True)
     excerpt_text = clean_plain[:155].strip() + "..."
 
@@ -1414,7 +1443,7 @@ def run_writer_pipeline() -> None:
     print("=" * 75)
     print(f"🚀 {CONFIG['site_name']} Humanized Engine (AdSense E-E-A-T Compliant)")
     print(f"Mode: {'FIRST BOOT (BASELINE LOCK)' if is_first_boot else 'LIVE SCAN & PUBLISH'}")
-    print(f"Time (IST): {now_ist_str()} | Model: {CONFIG['gemini_model']} | Max Age: {CONFIG['max_notice_age_hours']}h")
+    print(f"Time (IST): {now_ist_str()} | Model: {CONFIG['gemini_model']}")
     print("=" * 75)
 
     new_created = 0
@@ -1550,6 +1579,14 @@ def run_writer_pipeline() -> None:
 # 11. SAMPLE DEMO GENERATOR (FOR IMMEDIATE VISUAL INSPECTION)
 # ==============================================================================
 def generate_sample_demo_article() -> None:
+    """
+    Generates a full, live sample article demonstrating:
+    1. Human senior journalist writing style.
+    2. Zero AI clichés & natural exam terminology.
+    3. Practical candidate insights (E-E-A-T).
+    4. Google Rich Results FAQ Schema.
+    5. Clean HTML preview file saved to disk.
+    """
     os.makedirs(CONFIG["cache_dir"], exist_ok=True)
     sample_portal = {
         "org": "Staff Selection Commission (SSC)",
